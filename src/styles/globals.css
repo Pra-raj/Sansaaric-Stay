@@ -1,0 +1,35 @@
+@import "tailwindcss";
+
+@theme {
+  --color-brand-50: #f1f8ee;
+  --color-brand-100: #dcefd5;
+  --color-brand-500: #4f8f45;
+  --color-brand-600: #2f6b36;
+  --color-brand-700: #24552d;
+  --color-accent-400: #f3c84b;
+  --color-accent-500: #e5ae24;
+  --color-ink: #23332a;
+  --color-ink-soft: #68766b;
+  --color-link: #2f6b36;
+  --color-bg: #fbfcf8;
+  --color-surface: #ffffff;
+  --radius-card: 16px;
+}
+
+@layer base {
+  body {
+    @apply bg-bg text-ink antialiased;
+    caret-color: transparent;
+  }
+
+  input,
+  textarea,
+  [contenteditable="true"] {
+    caret-color: auto;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--color-brand-500);
+    outline-offset: 2px;
+  }
+}

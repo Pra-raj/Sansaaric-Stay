@@ -3,43 +3,74 @@
 import {
   type ReactNode,
   useContext,
+  useEffect,
   useMemo,
   useState,
   createContext,
 } from "react";
+import { loadStoredUser } from "./auth";
+import * as auth from "./auth";
 
-interface AuthUser {
+export interface AuthUser {
   name: string;
   email: string;
   initials: string;
+  photoUrl?: string;
 }
 
 interface AuthContextValue {
   isLoggedIn: boolean;
+  isLoading: boolean;
   user: AuthUser | null;
-  logIn: () => void;
-  loggedOut: () => void;
+  login: (email: string, password: string) => Promise<void>;
+  signup: (name: string, email: string, password: string) => Promise<void>;
+  logOut: () => void;
+  updateProfile: (patch: Partial<AuthUser>) => void;
 }
-
-const demoUser: AuthUser = {
-  name: "Prayag Raj Karki",
-  email: "prayag@email.com",
-  initials: "P",
-};
 
 const AuthContext = createContext<AuthContextValue | undefined>(undefined);
 
 export default function AuthProvider({ children }: { children: ReactNode }) {
-  const [isLoggedIn, setIsloggedIn] = useState(false);
+  const [user, setUser] = useState<AuthUser | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
+
+  useEffect(() => {
+    const id = window.setTimeout(() => {
+      setUser(loadStoredUser());
+      setIsLoading(false);
+    }, 0);
+    return () => window.clearTimeout(id);
+  }, []);
 
   const value = useMemo<AuthContextValue>(
     () => ({
-      isLoggedIn,
-      user: isLoggedIn ? demoUser : null,
-      logIn: () => setIsloggedIn(true),
-      loggedOut: () => setIsloggedIn(false),
+      isLoggedIn: user !== null,
+      isLoading,
+      user,
+      login: async (email: string, password: string) => {
+        const result = await auth.login(email, password);
+        auth.storeSession(result);
+        setUser(result.user);
+      },
+      signup: async (name, email, password) => {
+        const result = await auth.signup(name, email, password);
+        auth.storeSession(result);
+        setUser(result.user);
+      },
+      logOut: () => {
+        auth.clearSession();
+        setUser(null);
+      },
+      updateProfile: (patch) => {
+        setUser((prev) => {
+          if (!prev) return prev;
+          const next = { ...prev, ...patch };
+          auth.updateStoredUser(next);
+          return next;
+        });
+      },
     }),
-    [isLoggedIn],
+    [user, isLoading],
   );
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }

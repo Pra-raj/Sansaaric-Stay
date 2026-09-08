@@ -1,5 +1,23 @@
 @import "tailwindcss";
 
+@custom-variant dark (&:where(.dark, .dark *));
+
+:root {
+  --bg-rgb: 247 247 249;
+  --surface-rgb: 255 255 255;
+  --ink-rgb: 20 22 26;
+  --ink-soft-rgb: 92 98 112;
+  --border-rgb: 226 229 233;
+}
+
+.dark {
+  --bg-rgb: 15 17 21;
+  --surface-rgb: 26 28 34;
+  --ink-rgb: 237 238 240;
+  --ink-soft-rgb: 156 162 175;
+  --border-rgb: 58 63 72;
+}
+
 @theme {
   --color-brand-50: #f1f8ee;
   --color-brand-100: #dcefd5;
@@ -8,12 +26,16 @@
   --color-brand-700: #24552d;
   --color-accent-400: #f3c84b;
   --color-accent-500: #e5ae24;
-  --color-ink: #23332a;
-  --color-ink-soft: #68766b;
   --color-link: #2f6b36;
-  --color-bg: #fbfcf8;
-  --color-surface: #ffffff;
   --radius-card: 16px;
+}
+
+@theme inline {
+  --color-ink: rgb(var(--ink-rgb));
+  --color-ink-soft: rgb(var(--ink-soft-rgb));
+  --color-bg: rgb(var(--bg-rgb));
+  --color-surface: rgb(var(--surface-rgb));
+  --color-border: rgb(var(--border-rgb));
 }
 
 @layer base {

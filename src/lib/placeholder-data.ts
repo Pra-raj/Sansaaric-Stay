@@ -1,10 +1,10 @@
 import type { Booking, Destination, Hotel, Review } from "@/types";
 
 export const topDestinations: Destination[] = [
-  { id: "pokhara", name: "Pokhara", HotelCount: 24 },
-  { id: "kathmandu", name: "Kathmandu", HotelCount: 41 },
-  { id: "bhaktapur", name: "Bhaktapur", HotelCount: 9 },
-  { id: "lalitpur", name: "Lalitpur", HotelCount: 13 },
+  { id: "pokhara", name: "Pokhara", hotelCount: 24 },
+  { id: "kathmandu", name: "Kathmandu", hotelCount: 41 },
+  { id: "bhaktapur", name: "Bhaktapur", hotelCount: 9 },
+  { id: "lalitpur", name: "Lalitpur", hotelCount: 13 },
 ];
 
 /**
@@ -28,19 +28,19 @@ export const dummyHotels: Hotel[] = [
     tags: ["Lakeside", "Mountain view", "Breakfast included"],
     description:
       "A family-run homestay on the edge of Phewa Lake, five minutes on foot from the lakeside strip. Wake up to the Annapurna range across the water.",
-    amenities: "Free Wi-Fi, Breakfast included, Lake view, Airport pickup",
+    amenities: ["Free Wi-Fi", "Breakfast included", "Lake view", "Airport pickup"],
   },
   {
     id: "hotel-thamel-boutique",
     name: "Thamel Boutique Stay",
     location: "Kathmandu, Nepal",
-    propertyType: "hotel",
+    propertyType: "Hotel",
     rating: 4.5,
     startingPrice: 3200,
     tags: ["City center", "Rooftop cafe"],
     description:
       "A small boutique hotel tucked in a quiet lane just off Thamel's main strip — close to the nightlife, far enough to actually sleep.",
-    amenities: "Free Wi-Fi, Rooftop cafe, 24/7 front desk, Airport pickup",
+    amenities: ["Free Wi-Fi", "Rooftop cafe", "24/7 front desk", "Airport pickup"],
   },
   {
     id: "hotel-nagarkot-resort",
@@ -52,7 +52,7 @@ export const dummyHotels: Hotel[] = [
     tags: ["Sunrise view", "Himalaya view", "Fireplace rooms"],
     description:
       "Perched on the Nagarkot ridge with one of the most reliable Himalayan sunrise views near Kathmandu. Every room faces the mountains.",
-    amenities: "Free Wi-Fi, Himalaya view, In-room fireplace, Restaurant on-site",
+    amenities: ["Free Wi-Fi", "Himalaya view", "In-room fireplace", "Restaurant on-site"],
   },
   {
     id: "hotel-chitwan-jungle",
@@ -64,7 +64,7 @@ export const dummyHotels: Hotel[] = [
     tags: ["Jungle safari", "National park"],
     description:
       "Inside Chitwan National Park's buffer zone — jeep safaris, canoe rides, and a real chance at spotting a rhino before breakfast.",
-    amenities: "Jungle safari included, Free Wi-Fi, Restaurant on-site",
+    amenities: ["Jungle safari included", "Free Wi-Fi", "Restaurant on-site"],
   },
 ];
 

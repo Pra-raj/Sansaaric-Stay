@@ -1,17 +1,17 @@
 "use client";
 
 import { useState } from "react";
-import { MessageCircle, X } from "lucide-react";
 import ChatBubble from "./ChatBubble";
+import { useChat } from "@/lib/chat-context";
 
 const suggestedQuestions = [
-  "Anything near a lake under Rs.3,000?",
+  "Anything near a lake under Rs. 3,000?",
   "What's the cancellation policy?",
   "Best stays for a sunrise view?",
 ];
 
 export function ChatWidget() {
-  const [open, setOpen] = useState(false);
+  const { isOpen: open, close, open: openChat } = useChat();
   const [messages, setMessages] = useState<
     { from: "user" | "bot"; text: string }[]
   >([
@@ -45,11 +45,11 @@ export function ChatWidget() {
           <div className="flex items-center justify-between border-b border-black/5 px-4 py-3">
             <div>
               <p className="text-sm font-semibold">Sansaaric Stay Assistant</p>
-              <p className="text-sm text-emerald-600">&bull; Online</p>
+              <p className="text-xs text-emerald-600">&bull; Online</p>
             </div>
 
             <button
-              onClick={() => setOpen(false)}
+              onClick={close}
               aria-label="Close chat"
               className="text-ink-soft hover:text-ink"
             >
@@ -85,7 +85,7 @@ export function ChatWidget() {
             <input
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
-              placeholder="Ask about a stay......"
+              placeholder="Ask about a stay..."
               className="flex-1 rounded-full border border-black/10 px-3.5 py-2 text-sm outline-none focus:border-brand-500"
             />
 
@@ -100,8 +100,8 @@ export function ChatWidget() {
       )}
       {!open && (
         <button
-          onClick={() => setOpen(true)}
-          className="flex h-14 w-14 items-center justify-center rounded-full bg-brand-500 t5ext-white shadow-lg hover:bg-brnad-600"
+          onClick={openChat}
+          className="flex h-14 w-14 items-center justify-center rounded-full bg-brand-500 text-white shadow-lg hover:bg-brand-600"
           aria-label="Open Chat"
         >
           💬

@@ -1,24 +1,19 @@
 import Link from "next/link";
 import { ArrowLeft, Compass, Home, Search } from "lucide-react";
-import SiteFooter from "@/components/nav/SiteFooter";
-import TopNav from "@/components/nav/TopNav";
 
 export default function NotFound() {
   return (
-    <div className="flex min-h-screen flex-col bg-bg">
-      <TopNav />
+    <div className="flex min-h-[60vh] items-center overflow-hidden bg-bg">
+      <div
+        aria-hidden="true"
+        className="absolute -right-20 top-16 size-64 rounded-full border-[18px] border-accent-400/20 sm:size-96"
+      />
+      <div
+        aria-hidden="true"
+        className="absolute -left-24 bottom-0 size-72 rounded-full border-[12px] border-brand-100 sm:size-[28rem]"
+      />
 
-      <main className="relative flex flex-1 items-center overflow-hidden px-6 py-20 sm:px-10 lg:py-28">
-        <div
-          aria-hidden="true"
-          className="absolute -right-20 top-16 size-64 rounded-full border-[18px] border-accent-400/20 sm:size-96"
-        />
-        <div
-          aria-hidden="true"
-          className="absolute -left-24 bottom-0 size-72 rounded-full border-[12px] border-brand-100 sm:size-[28rem]"
-        />
-
-        <div className="relative mx-auto grid w-full max-w-6xl items-center gap-14 lg:grid-cols-[1fr_0.8fr] lg:gap-24">
+      <div className="relative mx-auto grid w-full max-w-6xl items-center gap-14 px-6 py-16 lg:grid-cols-[1fr_0.8fr] lg:gap-24">
           <div>
             <div className="mb-8 flex items-center gap-3 text-sm font-semibold uppercase tracking-[0.2em] text-brand-600">
               <span className="flex size-10 items-center justify-center rounded-full bg-brand-100">
@@ -79,9 +74,6 @@ export default function NotFound() {
             </div>
           </div>
         </div>
-      </main>
-
-      <SiteFooter />
-    </div>
+      </div>
   );
 }

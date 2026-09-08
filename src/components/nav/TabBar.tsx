@@ -52,7 +52,7 @@ function ChatIcon(props: SVGProps<SVGSVGElement>) {
       strokeWidth={1.8}
       {...props}
     >
-      <path d="M4 5h164v11H9l-5 4V5Z" />
+      <path d="M4 5h16v11H9l-5 4V5Z" />
     </svg>
   );
 }

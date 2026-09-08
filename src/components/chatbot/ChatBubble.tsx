@@ -11,7 +11,7 @@ export default function ChatBubble({
       <div
         className={[
           "max-w-[80%] rounded-2xl px-3.5 py-2 text-sm",
-          isUser ? "bg-brand-500 text-white" : "bg-black/5 text-ink",
+          isUser ? "bg-brand-500 text-white" : "bg-ink/5 text-ink",
         ].join(" ")}
       >
         {text}

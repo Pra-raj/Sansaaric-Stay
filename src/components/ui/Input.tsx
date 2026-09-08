@@ -18,7 +18,7 @@ function Input({ label, id, className = "", ...props }: InputProps) {
         className={[
           "w-full min-w-0 rounded-lg border border-black/10 bg-surface px-3.5 py-2.5 text-sm text-ink outline-none focus:border-brand-500",
           className,
-        ].join("")}
+        ].join(" ")}
         {...props}
       />
     </div>

@@ -3,8 +3,10 @@
 import Link from "next/link";
 import { Search } from "lucide-react";
 import { Button } from "../ui/Button";
+import { Avatar } from "../ui/Avatar";
 import { useAuthModal } from "@/lib/auth-modal-context";
 import { useAuth } from "@/lib/auth-context";
+import { ThemeToggle } from "../ui/ThemeToggle";
 
 const links = [
   {
@@ -59,20 +61,19 @@ function TopNav() {
         <div className="hidden shrink-0 items-center gap-3 lg:flex">
           {isLoggedIn && user ? (
             <Link href="/account" aria-label={`Your account, ${user.name}`}>
-              <span className="flex h-9 w-9 items-center justify-center rounded-full bg-brand-100 text-sm font-semibold text-brand-600">
-                {user.initials || user.name.charAt(0).toUpperCase()}
-              </span>
+              <Avatar user={user} size={36} />
             </Link>
           ) : (
             <>
               <Button variant="ghost" onClick={openLogin}>
                 Log in
               </Button>
-              <Button variant="ghost" onClick={openSignup}>
+              <Button variant="primary" onClick={openSignup}>
                 Sign up
               </Button>
             </>
           )}
+          <ThemeToggle />
         </div>
       </div>
     </header>

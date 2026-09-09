@@ -1,4 +1,5 @@
 import { CalendarDays, MapPin, Search, Users } from "lucide-react";
+import { todayISO } from "@/lib/date-utils";
 
 function BookingSearch() {
   return (
@@ -35,6 +36,8 @@ function BookingSearch() {
           <input
             name="checkIn"
             type="date"
+            min={todayISO()}
+            required
             aria-label="Check in date"
             className="w-full bg-transparent text-sm text-ink outline-none"
           />

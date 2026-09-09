@@ -1,12 +1,9 @@
 import { dummyBookings, dummyHotels, dummyReviews, topDestinations } from "./placeholder-data";
 import { getAccessToken } from "./auth";
+import { simulateNetwork } from "./simulate-network";
 import type { Booking, Destination, Hotel, Review } from "@/types";
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000/api";
-
-function simulateNetwork<T>(value: T, ms = 500): Promise<T> {
-  return new Promise((resolve) => setTimeout(() => resolve(value), ms));
-}
 
 export class ApiError extends Error {
   status: number;
@@ -53,33 +50,59 @@ export interface HotelSearchParams {
 }
 
 export async function getHotels(params: HotelSearchParams = {}): Promise<Hotel[]> {
-  let results = dummyHotels;
-  if (params.location) {
-    const q = params.location.toLowerCase();
-    results = results.filter((h) => h.location.toLowerCase().includes(q) || h.name.toLowerCase().includes(q));
+  const search = new URLSearchParams();
+  if (params.location) search.set("location", params.location);
+  if (params.minPrice !== undefined) search.set("minPrice", String(params.minPrice));
+  if (params.maxPrice !== undefined) search.set("maxPrice", String(params.maxPrice));
+  if (params.propertyType) search.set("propertyType", params.propertyType);
+  if (params.minRating !== undefined) search.set("minRating", String(params.minRating));
+  const qs = search.toString();
+  try {
+    return await apiFetch<Hotel[]>(`/hotels${qs ? `?${qs}` : ""}`);
+  } catch {
+    let results = dummyHotels;
+    if (params.location) {
+      const q = params.location.toLowerCase();
+      results = results.filter((h) => h.location.toLowerCase().includes(q) || h.name.toLowerCase().includes(q));
+    }
+    if (params.minPrice !== undefined) results = results.filter((h) => h.startingPrice >= params.minPrice!);
+    if (params.maxPrice !== undefined) results = results.filter((h) => h.startingPrice <= params.maxPrice!);
+    if (params.propertyType) results = results.filter((h) => h.propertyType === params.propertyType);
+    if (params.minRating !== undefined) results = results.filter((h) => h.rating >= params.minRating!);
+    return simulateNetwork(results);
   }
-  if (params.minPrice !== undefined) results = results.filter((h) => h.startingPrice >= params.minPrice!);
-  if (params.maxPrice !== undefined) results = results.filter((h) => h.startingPrice <= params.maxPrice!);
-  if (params.propertyType) results = results.filter((h) => h.propertyType === params.propertyType);
-  if (params.minRating !== undefined) results = results.filter((h) => h.rating >= params.minRating!);
-  return simulateNetwork(results);
 }
 
 export async function getHotelById(id: string): Promise<Hotel | null> {
-  const hotel = dummyHotels.find((h) => h.id === id) ?? null;
-  return simulateNetwork(hotel);
+  try {
+    return await apiFetch<Hotel>(`/hotels/${id}`);
+  } catch {
+    return simulateNetwork(dummyHotels.find((h) => h.id === id) ?? null);
+  }
 }
 
-export async function getHotelReviews(_hotelId: string): Promise<Review[]> {
-  return simulateNetwork(dummyReviews);
+export async function getHotelReviews(hotelId: string): Promise<Review[]> {
+  try {
+    return await apiFetch<Review[]>(`/hotels/${hotelId}/reviews`);
+  } catch {
+    return simulateNetwork(dummyReviews);
+  }
 }
 
 export async function getDestinations(): Promise<Destination[]> {
-  return simulateNetwork(topDestinations);
+  try {
+    return await apiFetch<Destination[]>("/destinations");
+  } catch {
+    return simulateNetwork(topDestinations);
+  }
 }
 
 export async function getMyBookings(): Promise<Booking[]> {
-  return simulateNetwork(dummyBookings);
+  try {
+    return await apiFetch<Booking[]>("/bookings");
+  } catch {
+    return simulateNetwork(dummyBookings);
+  }
 }
 
 export interface CreateBookingPayload {
@@ -94,15 +117,22 @@ export interface CreateBookingPayload {
 }
 
 export async function createBooking(payload: CreateBookingPayload): Promise<Booking> {
-  const hotel = dummyHotels.find((h) => h.id === payload.hotelId);
-  const fakeBooking: Booking = {
-    id: `bk-${Math.floor(Math.random() * 9000 + 1000)}`,
-    hotelName: hotel?.name ?? "Unknown hotel",
-    location: hotel?.location ?? "",
-    checkIn: payload.checkIn,
-    checkOut: payload.checkOut,
-    guests: payload.guests,
-    status: "Upcoming",
-  };
-  return simulateNetwork(fakeBooking, 800);
+  try {
+    return await apiFetch<Booking>("/bookings", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+  } catch {
+    const hotel = dummyHotels.find((h) => h.id === payload.hotelId);
+    const fakeBooking: Booking = {
+      id: `bk-${Math.floor(Math.random() * 9000 + 1000)}`,
+      hotelName: hotel?.name ?? "Unknown hotel",
+      location: hotel?.location ?? "",
+      checkIn: payload.checkIn,
+      checkOut: payload.checkOut,
+      guests: payload.guests,
+      status: "Upcoming",
+    };
+    return simulateNetwork(fakeBooking, 800);
+  }
 }

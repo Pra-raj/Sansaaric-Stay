@@ -1,6 +1,6 @@
 import type { SVGProps } from "react";
 
-export function SearchIcon() {
+export function SearchIcon(props: SVGProps<SVGSVGElement>) {
   return (
     <svg
       aria-hidden="true"
@@ -9,6 +9,7 @@ export function SearchIcon() {
       fill="none"
       stroke="currentColor"
       strokeWidth="1.8"
+      {...props}
     >
       <circle cx="11" cy="11" r="6.5" />
       <path d="m16 16 4.25 4.25" strokeLinecap="round" />
@@ -51,6 +52,65 @@ export function PinIcon() {
   );
 }
 
+export function HomeIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.8}
+      {...props}
+    >
+      <path d="M4 11.5 12 4l8 7.5" />
+      <path d="M6 10v9h12v-9" />
+    </svg>
+  );
+}
+
+export function BookingsIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.8}
+      {...props}
+    >
+      <rect x="4" y="5" width="16" height="15" rx="2" />
+      <path d="M8 3v4M16 3v4M4 10h16" />
+    </svg>
+  );
+}
+
+export function ChatIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.8}
+      {...props}
+    >
+      <path d="M4 5h16v11H9l-5 4V5Z" />
+    </svg>
+  );
+}
+
+export function ProfileIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.8}
+      {...props}
+    >
+      <circle cx="12" cy="8" r="3.5" />
+      <path d="M5 20c1.5-5 4.2-6 7-6s5.5 2 7 6" />
+    </svg>
+  );
+}
+
 //Google ICon
 
 export function GoogleIcon(props: SVGProps<SVGSVGElement>) {
@@ -82,6 +142,30 @@ export function FacebookIcon(props: SVGProps<SVGSVGElement>) {
   return (
     <svg viewBox="0 0 24 24" fill="#1877F2" {...props}>
       <path d="M24 12a12 12 0 1 0-13.875 11.85v-8.39H7.08V12h3.045V9.36c0-3.01 1.79-4.67 4.53-4.67 1.31 0 2.68.23 2.68.23v2.95h-1.51c-1.49 0-1.95.92-1.95 1.87V12h3.32l-.53 3.46h-2.79v8.39A12 12 0 0 0 24 12Z" />
+    </svg>
+  );
+}
+
+export function InstagramIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.8}
+      {...props}
+    >
+      <rect x="3.5" y="3.5" width="17" height="17" rx="5" />
+      <circle cx="12" cy="12" r="4" />
+      <circle cx="17.2" cy="6.8" r="1.1" fill="currentColor" stroke="none" />
+    </svg>
+  );
+}
+
+export function TikTokIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg viewBox="0 0 24 24" fill="currentColor" {...props}>
+      <path d="M16.5 3c.4 2.2 1.8 3.7 4 3.9v2.7c-1.4.1-2.7-.3-4-1.1v6.1a5.4 5.4 0 1 1-5.4-5.4c.2 0 .4 0 .7.1v2.8a2.6 2.6 0 1 0 2 2.5V3h2.7Z" />
     </svg>
   );
 }

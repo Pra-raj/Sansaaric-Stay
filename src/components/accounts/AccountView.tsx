@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useAuthModal } from "@/lib/auth-modal-context";
+import { statusTone } from "@/lib/booking-utils";
 import type { Booking } from "@/types";
 import { Button } from "../ui/Button";
 import { useAuth } from "@/lib/auth-context";
@@ -12,11 +13,6 @@ import { AccountSidebar } from "./AccountSidebar";
 import { BookingDetailsModal } from "./BookingDetailsModal";
 
 const tabs = ["Upcoming", "Completed", "Cancelled"] as const;
-function statusTone(status: Booking["status"]) {
-  if (status === "Upcoming") return "brand" as const;
-  if (status === "Completed") return "success" as const;
-  return "neutral" as const;
-}
 
 export function AccountView() {
   const { isLoggedIn, user } = useAuth();

@@ -20,15 +20,15 @@ export function SavedView() {
 
   useEffect(() => {
     if (!isLoggedIn) return;
-    let canclled = false;
+    let cancelled = false;
     getHotels().then((result) => {
-      if (!canclled) {
+      if (!cancelled) {
         setHotels(result);
         setLoading(false);
       }
     });
     return () => {
-      canclled = true;
+      cancelled = true;
     };
   }, [isLoggedIn]);
 

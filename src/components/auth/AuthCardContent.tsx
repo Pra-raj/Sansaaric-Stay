@@ -5,39 +5,13 @@ import { Button } from "@/components/ui/Button";
 import Input from "@/components/ui/Input";
 import { useAuth } from "@/lib/auth-context";
 import { useAuthModal } from "@/lib/auth-modal-context";
+import {
+  getPasswordError,
+  getPasswordLengthError,
+  isValidEmail,
+  MIN_PASSWORD_LEN,
+} from "@/lib/validation";
 import { FacebookIcon, GoogleIcon } from "../icons/icons";
-
-const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-const MIN_PASSWORD_LEN = 8;
-const COMMON_WEAK_PASSWORDS = new Set([
-  "12345678",
-  "123456789",
-  "1234567890",
-  "password",
-  "password1",
-  "qwertyui",
-  "qwerty123",
-  "letmein1",
-  "abc12345",
-  "iloveyou1",
-]);
-
-/** Real password-strength check, not just a length check — rejects 123456789-style passwords. */
-function getPasswordError(password: string): string | null {
-  if (password.length < MIN_PASSWORD_LEN) {
-    return `Password must be at least ${MIN_PASSWORD_LEN} characters.`;
-  }
-  if (!/[a-zA-Z]/.test(password)) {
-    return "Password must include at least one letter.";
-  }
-  if (!/[0-9]/.test(password)) {
-    return "Password must include at least one number.";
-  }
-  if (COMMON_WEAK_PASSWORDS.has(password.toLowerCase())) {
-    return "That password is too common — choose something less guessable.";
-  }
-  return null;
-}
 
 /**
  * The card itself — sliding login/signup panels, each stacked
@@ -82,14 +56,13 @@ export function AuthCardContent() {
 
   async function handleLoginSubmit(e: React.FormEvent) {
     e.preventDefault();
-    if (!EMAIL_RE.test(loginEmail)) {
+    if (!isValidEmail(loginEmail)) {
       setLoginError("Enter a valid email address.");
       return;
     }
-    if (loginPassword.length < MIN_PASSWORD_LEN) {
-      setLoginError(
-        `Password must be at least ${MIN_PASSWORD_LEN} characters.`,
-      );
+    const loginPasswordError = getPasswordLengthError(loginPassword);
+    if (loginPasswordError) {
+      setLoginError(loginPasswordError);
       return;
     }
     setLoginError("");
@@ -112,7 +85,7 @@ export function AuthCardContent() {
       setSignupError("Enter your full name.");
       return;
     }
-    if (!EMAIL_RE.test(signupEmail)) {
+    if (!isValidEmail(signupEmail)) {
       setSignupError("Enter a valid email address.");
       return;
     }
@@ -321,7 +294,7 @@ function SocialButton({
   return (
     <button
       type="button"
-      className="flex w-full items-center justify-center gap-2.5 rounded-lg border border-border/10 bg-surface py-2.5 text-sm font-semibold text-ink transition-colors hover:bg-bg"
+      className="flex w-full items-center justify-center gap-2.5 rounded-lg border border-border bg-surface py-2.5 text-sm font-semibold text-ink shadow-sm transition-colors hover:border-brand-500/40 hover:bg-bg"
     >
       {icon}
       {label}

@@ -29,6 +29,18 @@ export function FilterPanel({
     });
   }
 
+  const minNum = Number(filters.minPrice);
+  const maxNum = Number(filters.maxPrice);
+  const rangeInvalid =
+    (filters.minPrice !== "" && (isNaN(minNum) || minNum < 0)) ||
+    (filters.maxPrice !== "" && (isNaN(maxNum) || maxNum < 0)) ||
+    (filters.minPrice !== "" &&
+      filters.maxPrice !== "" &&
+      minNum > maxNum);
+  const rangeError = rangeInvalid
+    ? "Enter a valid range (min below max, no negatives)."
+    : "";
+
   return (
     <aside className="w-full shrink-0 space-y-6 rounded-card border border-black/5 bg-surface p-5 sm:w-64">
       <div>
@@ -52,6 +64,7 @@ export function FilterPanel({
               id="filter-min"
               label="Min"
               type="number"
+              min={0}
               placeholder="1000"
               value={filters.minPrice}
               onChange={(e) =>
@@ -65,6 +78,7 @@ export function FilterPanel({
               id="filter-max"
               label="Max"
               type="number"
+              min={0}
               placeholder="6000"
               value={filters.maxPrice}
               onChange={(e) =>
@@ -73,6 +87,9 @@ export function FilterPanel({
             />
           </div>
         </div>
+        {rangeError && (
+          <p className="mt-2 text-xs font-medium text-red-600">{rangeError}</p>
+        )}
       </div>
 
       <div>

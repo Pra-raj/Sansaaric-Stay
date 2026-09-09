@@ -8,8 +8,13 @@ import { Avatar } from "@/components/ui/Avatar";
 import { AccountSidebar } from "./AccountSidebar";
 import { useAuth } from "@/lib/auth-context";
 import { useAuthModal } from "@/lib/auth-modal-context";
+import {
+  getPasswordError,
+  getPasswordLengthError,
+  isValidEmail,
+  MIN_PASSWORD_LEN,
+} from "@/lib/validation";
 
-const MIN_PASSWORD_LEN = 8;
 const MAX_PHOTO_BYTES = 2 * 1024 * 1024; // 2MB — keeps localStorage usage sane
 
 /**
@@ -28,6 +33,7 @@ export function SettingsView() {
   const [email, setEmail] = useState(user?.email ?? "");
   const [photoPreview, setPhotoPreview] = useState(user?.photoUrl);
   const [photoError, setPhotoError] = useState("");
+  const [profileError, setProfileError] = useState("");
   const [profileSaved, setProfileSaved] = useState(false);
 
   const [currentPassword, setCurrentPassword] = useState("");
@@ -40,6 +46,9 @@ export function SettingsView() {
   const [dealsAndOffers, setDealsAndOffers] = useState(false);
 
   const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [deletePassword, setDeletePassword] = useState("");
+  const [deleteError, setDeleteError] = useState("");
+  const canDelete = deletePassword.trim().length >= MIN_PASSWORD_LEN;
 
   if (!isLoggedIn || !user) {
     return (
@@ -74,6 +83,15 @@ export function SettingsView() {
 
   function handleSaveProfile(e: React.FormEvent) {
     e.preventDefault();
+    if (name.trim().length < 2) {
+      setProfileError("Enter your full name.");
+      return;
+    }
+    if (!isValidEmail(email)) {
+      setProfileError("Enter a valid email address.");
+      return;
+    }
+    setProfileError("");
     updateProfile({
       name,
       email,
@@ -86,8 +104,14 @@ export function SettingsView() {
 
   function handleChangePassword(e: React.FormEvent) {
     e.preventDefault();
-    if (newPassword.length < MIN_PASSWORD_LEN) {
-      setPasswordError(`New password must be at least ${MIN_PASSWORD_LEN} characters.`);
+    const currentPasswordError = getPasswordLengthError(currentPassword.trim());
+    if (currentPasswordError) {
+      setPasswordError(`Current password: ${currentPasswordError}`);
+      return;
+    }
+    const newPasswordError = getPasswordError(newPassword);
+    if (newPasswordError) {
+      setPasswordError(`New password: ${newPasswordError}`);
       return;
     }
     if (newPassword !== confirmPassword) {
@@ -103,6 +127,16 @@ export function SettingsView() {
   }
 
   function handleLogout() {
+    logOut();
+    router.push("/");
+  }
+
+  function handleDeleteAccount() {
+    const deletePasswordError = getPasswordLengthError(deletePassword.trim());
+    if (deletePasswordError) {
+      setDeleteError(`Enter your password (min. ${MIN_PASSWORD_LEN} characters).`);
+      return;
+    }
     logOut();
     router.push("/");
   }
@@ -130,8 +164,9 @@ export function SettingsView() {
                 </div>
               </div>
               {photoError && <p className="text-xs font-medium text-red-600">{photoError}</p>}
-              <Input id="settings-name" label="Full name" value={name} onChange={(e) => setName(e.target.value)} />
-              <Input id="settings-email" label="Email" type="email" value={email} onChange={(e) => setEmail(e.target.value)} />
+              <Input id="settings-name" label="Full name" value={name} onChange={(e) => setName(e.target.value)} error={!!profileError} />
+              <Input id="settings-email" label="Email" type="email" value={email} onChange={(e) => setEmail(e.target.value)} error={!!profileError} />
+              {profileError && <p className="text-xs font-medium text-red-600">{profileError}</p>}
               <div className="flex items-center gap-3">
                 <Button type="submit">Save profile</Button>
                 {profileSaved && <span className="text-sm font-medium text-emerald-600">Saved.</span>}
@@ -224,19 +259,58 @@ export function SettingsView() {
               This permanently deletes your account and booking history. This can&apos;t be undone.
             </p>
             {confirmingDelete ? (
-              <div className="flex items-center gap-3">
-                <Button
-                  onClick={handleLogout}
-                  className="!bg-red-600 hover:!bg-red-700"
-                >
-                  Yes, delete my account
-                </Button>
-                <Button variant="ghost" onClick={() => setConfirmingDelete(false)}>
-                  Cancel
-                </Button>
-              </div>
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  handleDeleteAccount();
+                }}
+                className="space-y-3"
+              >
+                <Input
+                  id="delete-account-password"
+                  label="Enter your password to confirm"
+                  type="password"
+                  placeholder="••••••••"
+                  value={deletePassword}
+                  onChange={(e) => setDeletePassword(e.target.value)}
+                  autoFocus
+                />
+                {deleteError && (
+                  <p className="text-xs font-medium text-red-600">{deleteError}</p>
+                )}
+                <div className="flex items-center gap-3">
+                  {canDelete ? (
+                    <Button type="submit" className="!bg-red-600 hover:!bg-red-700">
+                      Yes, delete my account
+                    </Button>
+                  ) : (
+                    <p className="text-xs text-red-700/70">
+                      Enter your password to reveal the confirm button.
+                    </p>
+                  )}
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    onClick={() => {
+                      setConfirmingDelete(false);
+                      setDeletePassword("");
+                      setDeleteError("");
+                    }}
+                  >
+                    Cancel
+                  </Button>
+                </div>
+              </form>
             ) : (
-              <Button variant="ghost" className="!text-red-700" onClick={() => setConfirmingDelete(true)}>
+              <Button
+                variant="ghost"
+                className="!text-red-700"
+                onClick={() => {
+                  setDeletePassword("");
+                  setDeleteError("");
+                  setConfirmingDelete(true);
+                }}
+              >
                 Delete my account
               </Button>
             )}

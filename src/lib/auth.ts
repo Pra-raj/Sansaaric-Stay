@@ -1,12 +1,9 @@
 import type { AuthUser } from "./auth-context";
+import { simulateNetwork } from "./simulate-network";
 
 const ACCESS_TOKEN_KEY = "sansaaric-access-token";
 const REFRESH_TOKEN_KEY = "sansaaric-refresh-token";
 const USER_KEY = "sansaaric-user";
-
-function simulateNetwork<T>(value: T, ms = 600): Promise<T> {
-  return new Promise((resolve) => setTimeout(() => resolve(value), ms));
-}
 
 export interface AuthResult {
   user: AuthUser;
@@ -18,6 +15,7 @@ function initials(name: string): string {
   return name.trim().charAt(0).toUpperCase() || "?";
 }
 
+// eslint-disable-next-line @typescript-eslint/no-unused-vars -- password placeholder until real backend verify
 export async function login(email: string, _password: string): Promise<AuthResult> {
   const user: AuthUser = { name: "Prayag Raj Karki", email, initials: initials("Prayag Raj Karki") };
   return simulateNetwork({
@@ -27,6 +25,7 @@ export async function login(email: string, _password: string): Promise<AuthResul
   });
 }
 
+// eslint-disable-next-line @typescript-eslint/no-unused-vars -- password placeholder until real auth backend exists
 export async function signup(name: string, email: string, _password: string): Promise<AuthResult> {
   const user: AuthUser = { name, email, initials: initials(name) };
   return simulateNetwork({

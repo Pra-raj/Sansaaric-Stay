@@ -1,12 +1,7 @@
 import { Modal } from "../auth/Modal";
 import { Badge } from "../ui/Badge";
+import { statusTone } from "@/lib/booking-utils";
 import type { Booking } from "@/types";
-
-function statusTone(status: Booking["status"]) {
-  if (status === "Upcoming") return "brand" as const;
-  if (status === "Completed") return "success" as const;
-  return "neutral" as const;
-}
 
 export function BookingDetailsModal({
   booking,

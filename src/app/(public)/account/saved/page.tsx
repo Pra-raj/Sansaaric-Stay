@@ -6,6 +6,6 @@ export const metadata: Metadata = {
   description: "Hotels and homestays you've saved for later.",
 };
 
-export default function savedPage() {
+export default function SavedPage() {
   return <SavedView />;
 }

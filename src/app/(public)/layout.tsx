@@ -11,7 +11,7 @@ export default function PublicLayout({
   return (
     <>
       <TopNav />
-      <main className="pb-20 md:pb-0">{children}</main>
+      <main className="flex-1 pb-20 md:pb-0">{children}</main>
       <SiteFooter />
       <TabBar />
       <ChatWidget />

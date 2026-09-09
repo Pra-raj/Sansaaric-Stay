@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import Script from "next/script";
 import "../styles/globals.css";
 import AuthModalHost from "@/components/auth/AuthModalHost";
 import AuthProvider from "@/lib/auth-context";
@@ -19,11 +20,13 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
   return (
     <html lang="en" suppressHydrationWarning>
       <head>
-        <script
+        <Script
+          id="theme-init"
+          strategy="beforeInteractive"
           dangerouslySetInnerHTML={{ __html: THEME_INIT_SCRIPT }}
         />
       </head>
-      <body className="min-h-full flex flex-col">
+      <body className="flex min-h-dvh flex-col">
         <ThemeProvider>
           <SavedProvider>
             <AuthProvider>

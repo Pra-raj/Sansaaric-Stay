@@ -2,6 +2,7 @@
 
 import { useEffect, useState, use } from "react";
 import { useRouter } from "next/navigation";
+import { CheckCircle2 } from "lucide-react";
 import StepIndicator from "@/components/booking/StepIndicator";
 import BookingSummary from "@/components/booking/BookingSummary";
 import { Button } from "@/components/ui/Button";
@@ -9,12 +10,12 @@ import Input from "@/components/ui/Input";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { createBooking, getHotelById } from "@/lib/api-client";
 import { isDateRangeValid, nightsBetween, todayISO } from "@/lib/date-utils";
+import { isValidEmail } from "@/lib/validation";
 import { useAuth } from "@/lib/auth-context";
 import { useAuthModal } from "@/lib/auth-modal-context";
 import type { BookingDraft, Hotel } from "@/types";
 
-const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-const MAX_GUESTS = 10;
+const MAX_GUESTS = 12;
 
 export default function BookingFlowPage({
   params,
@@ -30,6 +31,8 @@ export default function BookingFlowPage({
   const [hotelLoading, setHotelLoading] = useState(true);
 
   const [step, setStep] = useState(1);
+  const [step1Attempted, setStep1Attempted] = useState(false);
+  const [step2Attempted, setStep2Attempted] = useState(false);
 
   // Step 1 — trip details
   const [checkIn, setCheckIn] = useState("");
@@ -46,6 +49,7 @@ export default function BookingFlowPage({
     "eSewa" | "Khalti" | "Card"
   >("eSewa");
   const [agreedToPolicy, setAgreedToPolicy] = useState(false);
+  const [agreeError, setAgreeError] = useState(false);
   const [paying, setPaying] = useState(false);
   const [paymentError, setPaymentError] = useState("");
 
@@ -106,7 +110,7 @@ export default function BookingFlowPage({
   const step1Valid = dateRangeValid && guestsValid;
 
   const nameValid = fullName.trim().length > 1;
-  const emailValid = EMAIL_RE.test(email);
+  const emailValid = isValidEmail(email);
   const phoneValid = phone.replace(/[^\d]/g, "").length >= 7;
   const step2Valid = nameValid && emailValid && phoneValid;
 
@@ -129,8 +133,22 @@ export default function BookingFlowPage({
     setStep((s) => s + 1);
   }
 
+  function handleStep1Continue() {
+    setStep1Attempted(true);
+    if (step1Valid) goNext();
+  }
+
+  function handleStep2Continue() {
+    setStep2Attempted(true);
+    if (step2Valid) goNext();
+  }
+
   async function handlePay() {
     setPaymentError("");
+    if (!agreedToPolicy) {
+      setAgreeError(true);
+      return;
+    }
     setPaying(true);
     try {
       const booking = await createBooking({
@@ -163,7 +181,7 @@ export default function BookingFlowPage({
       </div>
 
       <div className="grid grid-cols-1 gap-8 lg:grid-cols-[1fr_360px]">
-        <div className="rounded-card border border-border/10 bg-surface p-6">
+        <div className="rounded-card border border-border bg-surface p-6">
           {step === 1 && (
             <div className="space-y-4">
               <h2 className="text-lg font-semibold">Trip details</h2>
@@ -175,6 +193,7 @@ export default function BookingFlowPage({
                   min={todayISO()}
                   value={checkIn}
                   onChange={(e) => setCheckIn(e.target.value)}
+                  error={step1Attempted && !checkIn}
                   required
                 />
                 <Input
@@ -184,18 +203,13 @@ export default function BookingFlowPage({
                   min={checkIn || todayISO()}
                   value={checkOut}
                   onChange={(e) => setCheckOut(e.target.value)}
+                  error={step1Attempted && !checkOut}
                   required
                 />
               </div>
-              {checkIn && checkOut && !dateRangeValid && (
-                <p className="text-xs font-medium text-red-600">
-                  Check-out must be after check-in, and check-in can&apos;t be
-                  in the past.
-                </p>
-              )}
               <Input
                 id="guests"
-                label={`Guests (max ${MAX_GUESTS})`}
+                label="Guests"
                 type="number"
                 min={1}
                 max={MAX_GUESTS}
@@ -203,10 +217,13 @@ export default function BookingFlowPage({
                 onChange={(e) =>
                   setGuestsInput(e.target.value.replace(/[^\d]/g, ""))
                 }
+                error={step1Attempted && !guestsValid}
               />
-              {!guestsValid && (
+              {step1Attempted && guestsInput !== "" && !guestsValid && (
                 <p className="text-xs font-medium text-red-600">
-                  Choose between 1 and {MAX_GUESTS} guests.
+                  {guests < 1
+                    ? "Enter at least 1 guest."
+                    : `Enter no more than ${MAX_GUESTS} guests.`}
                 </p>
               )}
             </div>
@@ -221,6 +238,7 @@ export default function BookingFlowPage({
                 placeholder="Anika Sharma"
                 value={fullName}
                 onChange={(e) => setFullName(e.target.value)}
+                error={step2Attempted && !nameValid}
                 required
               />
               <Input
@@ -230,9 +248,10 @@ export default function BookingFlowPage({
                 placeholder="anika@example.com"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
+                error={step2Attempted && !email}
                 required
               />
-              {email.length > 0 && !emailValid && (
+              {step2Attempted && email.length > 0 && !emailValid && (
                 <p className="text-xs font-medium text-red-600">
                   Enter a valid email address.
                 </p>
@@ -247,9 +266,10 @@ export default function BookingFlowPage({
                 onChange={(e) =>
                   setPhone(e.target.value.replace(/[^\d +\-()]/g, ""))
                 }
+                error={step2Attempted && !phone}
                 required
               />
-              {phone.length > 0 && !phoneValid && (
+              {step2Attempted && phone.length > 0 && !phoneValid && (
                 <p className="text-xs font-medium text-red-600">
                   Enter a valid phone number.
                 </p>
@@ -261,31 +281,58 @@ export default function BookingFlowPage({
             <div className="space-y-4">
               <h2 className="text-lg font-semibold">Payment</h2>
               <div className="grid grid-cols-3 gap-3">
-                {(["eSewa", "Khalti", "Card"] as const).map((method) => (
-                  <label
-                    key={method}
-                    className="flex cursor-pointer flex-col items-center gap-2 rounded-lg border border-border/10 p-4 text-sm font-semibold has-[:checked]:border-brand-500 has-[:checked]:bg-brand-50"
-                  >
-                    <input
-                      type="radio"
-                      name="payment-method"
-                      checked={paymentMethod === method}
-                      onChange={() => setPaymentMethod(method)}
-                      className="sr-only"
-                    />
-                    {method}
-                  </label>
-                ))}
+                {(["eSewa", "Khalti", "Card"] as const).map((method) => {
+                  const isSelected = paymentMethod === method;
+                  return (
+                    <label
+                      key={method}
+                      className={`relative flex cursor-pointer flex-col items-center gap-2 rounded-lg border p-4 text-sm font-semibold transition-colors ${
+                        isSelected
+                          ? "border-brand-500 bg-brand-500/10"
+                          : "border-border bg-surface"
+                      }`}
+                    >
+                      <input
+                        type="radio"
+                        name="payment-method"
+                        checked={isSelected}
+                        onChange={() => setPaymentMethod(method)}
+                        className="sr-only"
+                      />
+                      {method}
+                      {isSelected && (
+                        <CheckCircle2
+                          className="absolute right-2 top-2 h-4 w-4 text-brand-500"
+                          aria-hidden="true"
+                        />
+                      )}
+                    </label>
+                  );
+                })}
               </div>
-              <label className="flex items-start gap-2 text-sm text-ink-soft">
+              <label
+                className={`flex items-start gap-2 text-sm ${
+                  agreeError ? "text-red-600" : "text-ink-soft"
+                }`}
+              >
                 <input
                   type="checkbox"
                   checked={agreedToPolicy}
-                  onChange={(e) => setAgreedToPolicy(e.target.checked)}
-                  className="mt-0.5 h-4 w-4 rounded border-border/10"
+                  onChange={(e) => {
+                    setAgreedToPolicy(e.target.checked);
+                    if (e.target.checked) setAgreeError(false);
+                  }}
+                  className={`mt-0.5 h-4 w-4 rounded ${
+                    agreeError ? "border-red-500" : "border-border"
+                  }`}
                 />
                 I agree to the property&apos;s cancellation policy.
               </label>
+              {agreeError && (
+                <p className="text-xs font-medium text-red-600">
+                  You must agree to the cancellation policy to continue.
+                </p>
+              )}
               {paymentError && (
                 <p className="text-xs font-medium text-red-600">
                   {paymentError}
@@ -322,17 +369,17 @@ export default function BookingFlowPage({
             )}
 
             {step === 1 && (
-              <Button onClick={goNext} disabled={!step1Valid}>
+              <Button onClick={handleStep1Continue}>
                 Continue
               </Button>
             )}
             {step === 2 && (
-              <Button onClick={goNext} disabled={!step2Valid}>
+              <Button onClick={handleStep2Continue}>
                 Continue
               </Button>
             )}
             {step === 3 && (
-              <Button onClick={handlePay} disabled={!agreedToPolicy || paying}>
+              <Button onClick={handlePay} disabled={paying}>
                 {paying
                   ? "Processing payment…"
                   : `Pay NPR ${draft.total.toLocaleString()}`}

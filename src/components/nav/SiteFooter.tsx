@@ -1,6 +1,5 @@
 import Link from "next/link";
-import { FacebookIcon } from "../icons/icons";
-import { Globe2, Music2 } from "lucide-react";
+import { FacebookIcon, InstagramIcon, TikTokIcon } from "../icons/icons";
 
 const columns = [
   {
@@ -41,9 +40,21 @@ const columns = [
 ];
 
 const socialLinks = [
-  { label: "Facebook", href: "#", icon: FacebookIcon },
-  { label: "Instagram", href: "#", icon: Globe2 },
-  { label: "TikTok", href: "#", icon: Music2 },
+  {
+    label: "Facebook",
+    href: "https://www.facebook.com/share/1FKDJxx47K/?mibextid=wwXIfr",
+    icon: FacebookIcon,
+  },
+  {
+    label: "Instagram",
+    href: "https://www.instagram.com/sansaaric.stay?stkn=bGZwcXhmMXh2cWk=",
+    icon: InstagramIcon,
+  },
+  {
+    label: "TikTok",
+    href: "https://www.tiktok.com/@sansaaric.stay?_r=1&_t=ZS-99a7XLQl2Zt",
+    icon: TikTokIcon,
+  },
 ];
 
 //footer

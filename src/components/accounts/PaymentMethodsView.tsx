@@ -5,6 +5,7 @@ import { AccountSidebar } from "./AccountSidebar";
 import { useAuth } from "@/lib/auth-context";
 import { useAuthModal } from "@/lib/auth-modal-context";
 import { Button } from "../ui/Button";
+import Input from "../ui/Input";
 
 interface SavedCard {
   id: string;
@@ -54,18 +55,30 @@ export function PaymentMethodsView() {
       setError("Enter expiry as MM/YY.");
       return;
     }
+    const [mmStr, yyStr] = expiry.split("/");
+    const mm = Number(mmStr);
+    const yy = Number(yyStr);
+    if (mm < 1 || mm > 12) {
+      setError("Expiry month must be between 01 and 12.");
+      return;
+    }
+    const now = new Date();
+    const expDate = new Date(2000 + yy, mm); // first day of the month after expiry
+    if (expDate <= now) {
+      setError("Card has already expired.");
+      return;
+    }
     if (cvc.replace(/\D/g, "").length < 3) {
       setError("Enter a valid CVC.");
       return;
     }
     const brand = cardNumber.startsWith("4") ? "Visa" : "Mastercard";
-    const [mm, yy] = expiry.split("/");
     const newCard: SavedCard = {
       id: `pm-${Date.now()}`,
       brand,
       last4: digits.slice(-4),
-      expMonth: mm,
-      expYear: `20${yy}`,
+      expMonth: mmStr,
+      expYear: `20${yyStr}`,
     };
     setCards((prev) => [...prev, newCard]);
     setCardNumber("");
@@ -140,36 +153,33 @@ export function PaymentMethodsView() {
           <section className="rounded-card border border-border/10 bg-surface p-5">
             <h2 className="mb-4 font-semibold">Add a card</h2>
             <form onSubmit={handleAddCard} className="space-y-4">
-              <div>
-                <label className="mb-1 block text-sm font-medium">Card number</label>
-                <input
-                  value={cardNumber}
-                  onChange={(e) => setCardNumber(e.target.value)}
-                  placeholder="1234 5678 9012 3456"
-                  inputMode="numeric"
-                  className="w-full rounded-lg border border-border/10 bg-bg px-3 py-2 text-sm outline-none focus:border-brand-500"
-                />
-              </div>
+              <Input
+                id="pm-card-number"
+                label="Card number"
+                value={cardNumber}
+                onChange={(e) => setCardNumber(e.target.value)}
+                placeholder="1234 5678 9012 3456"
+                inputMode="numeric"
+                error={!!error}
+              />
               <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="mb-1 block text-sm font-medium">Expiry (MM/YY)</label>
-                  <input
-                    value={expiry}
-                    onChange={(e) => setExpiry(e.target.value)}
-                    placeholder="12/27"
-                    className="w-full rounded-lg border border-border/10 bg-bg px-3 py-2 text-sm outline-none focus:border-brand-500"
-                  />
-                </div>
-                <div>
-                  <label className="mb-1 block text-sm font-medium">CVC</label>
-                  <input
-                    value={cvc}
-                    onChange={(e) => setCvc(e.target.value)}
-                    placeholder="123"
-                    inputMode="numeric"
-                    className="w-full rounded-lg border border-border/10 bg-bg px-3 py-2 text-sm outline-none focus:border-brand-500"
-                  />
-                </div>
+                <Input
+                  id="pm-expiry"
+                  label="Expiry (MM/YY)"
+                  value={expiry}
+                  onChange={(e) => setExpiry(e.target.value)}
+                  placeholder="12/27"
+                  error={!!error}
+                />
+                <Input
+                  id="pm-cvc"
+                  label="CVC"
+                  value={cvc}
+                  onChange={(e) => setCvc(e.target.value)}
+                  placeholder="123"
+                  inputMode="numeric"
+                  error={!!error}
+                />
               </div>
               {error && <p className="text-xs font-medium text-red-600">{error}</p>}
               <Button type="submit">Add card</Button>

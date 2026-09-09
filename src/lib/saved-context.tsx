@@ -13,10 +13,8 @@ const STORAGE_KEY = "sansaaric-saved_hotels";
 
 export function SavedProvider({ children }: { children: React.ReactNode }) {
   const [savedIds, setSavedIds] = useState<string[]>(() => {
-    if (typeof window === "undefined") return [];
     try {
-      const raw = localStorage.getItem(STORAGE_KEY);
-      return raw ? JSON.parse(raw) : [];
+      return JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "[]");
     } catch {
       return [];
     }

@@ -1,0 +1,282 @@
+{% extends "base.html" %}
+{% block title %}Chat · RAG Chat{% endblock %}
+{% block head %}
+<style>
+  .chat { display: flex; flex-direction: column; height: calc(100vh - 56px - 28px); max-height: 720px; min-height: 420px; }
+  .chat .panel { display: flex; flex-direction: column; margin-bottom: 0; flex: 1; padding: 0; overflow: hidden; }
+  .chat-head { display: flex; align-items: baseline; justify-content: space-between; padding: 16px 20px; border-bottom: 1px solid var(--line); }
+  .chat-head .muted { font-size: 13px; }
+  .thread { flex: 1; overflow-y: auto; padding: 12px 16px; display: flex; flex-direction: column; gap: 10px; }
+  .bubble { max-width: 72%; padding: 9px 13px; border-radius: 12px; white-space: pre-wrap; overflow-wrap: break-word; font-size: 15px; }
+  .bubble.user { align-self: flex-end; background: var(--accent); color: var(--accent-ink); border-bottom-right-radius: 4px; }
+  .bubble.assistant { align-self: flex-start; background: #f1f5f9; border: 1px solid var(--line); border-bottom-left-radius: 4px; }
+  .sources { margin-top: 10px; font-size: 13px; }
+  .sources summary { cursor: pointer; color: var(--accent); font-weight: 600; user-select: none; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+  .chip-source { background: #e2e8f0; border-radius: 999px; padding: 3px 10px; font-size: 12px; color: #334155; cursor: help; }
+  .composer { display: flex; gap: 10px; padding: 10px 16px; border-top: 1px solid var(--line); }
+  .composer input[type=text] { flex: 1; }
+  .composer button { white-space: nowrap; }
+  .empty-thread { margin: auto; color: var(--muted); text-align: center; }
+  .chat-error { margin: 0 20px; padding: 8px 12px; border-radius: 8px; background: #fee2e2; color: var(--fail); font-size: 13px; display: none; }
+  .thinking { color: var(--muted); font-size: 14px; animation: pulse 1.2s ease-in-out infinite; }
+  @keyframes pulse { 0%, 100% { opacity: .45; } 50% { opacity: 1; } }
+</style>
+{% endblock %}
+{% block content %}
+
+<div class="chat">
+  <div class="panel">
+    <div class="chat-head">
+      <h1>Chat with your documents</h1>
+      <a class="btn" href="/">New chat</a>
+    </div>
+    <div class="chat-error" id="chat-error"></div>
+    <div class="thread" id="thread">
+      {% if thread %}
+        {% for message in thread %}
+          {% if message.role == "user" %}
+            <div class="bubble user">{{ message.content|linebreaksbr }}</div>
+          {% else %}
+            <div class="bubble assistant">
+              <div>{{ message.content|linebreaksbr }}</div>
+              {% if message.citations %}
+                <details class="sources">
+                  <summary>Sources ({{ message.citations|length }})</summary>
+                  <div class="chips">
+                    {% for citation in message.citations %}
+                      <span class="chip-source" title="{{ citation.text }}">{{ citation.source }}{% if citation.page %} · p{{ citation.page }}{% endif %}</span>
+                    {% endfor %}
+                  </div>
+                </details>
+              {% endif %}
+            </div>
+          {% endif %}
+        {% endfor %}
+      {% else %}
+        <div class="empty-thread">
+          Ask about the trained documents, e.g. how does the attention mechanism work?
+        </div>
+      {% endif %}
+    </div>
+    <form class="composer" id="composer" autocomplete="off">
+      <input type="hidden" name="csrfmiddlewaretoken" value="{{ csrf_token }}">
+      <input type="text" name="message" id="message" placeholder="Ask a question…" {% if not thread %}autofocus{% endif %}>
+      <button type="submit" class="primary" id="send">Send</button>
+    </form>
+  </div>
+</div>
+
+<script>
+(function () {
+  const thread = document.getElementById('thread');
+  const form = document.getElementById('composer');
+  const input = document.getElementById('message');
+  const sendBtn = document.getElementById('send');
+  const errorBox = document.getElementById('chat-error');
+  const csrf = document.querySelector('input[name=csrfmiddlewaretoken]').value;
+
+  let conversationId = {{ conversation.pk|default:0 }};
+  let streaming = false;
+  let streamText = '';
+  let streamBody = null;
+  let streamCard = null;
+
+  function bubble(role, text) {
+    const el = document.createElement('div');
+    el.className = 'bubble ' + role;
+    el.textContent = text;
+    return el;
+  }
+
+  function cleanMarkdown(text) {
+    return String(text)
+      .replace(/\*\*([^*\n]+)\*\*/g, '$1')
+      .replace(/__([^_\n]+)__/g, '$1')
+      .replace(/\*([^*\n]+)\*/g, '$1')
+      .replace(/^#{1,6}\s*/gm, '')
+      .replace(/^\s*[-*]\s+/gm, '');
+  }
+
+  function citationChip(citation) {
+    const chip = document.createElement('span');
+    chip.className = 'chip-source';
+    chip.title = citation.text || '';
+    chip.textContent = (citation.source || 'source') + (citation.page ? ' · p' + citation.page : '');
+    return chip;
+  }
+
+  function scrollBottom() { thread.scrollTop = thread.scrollHeight; }
+
+  function showError(text) {
+    errorBox.textContent = text;
+    errorBox.style.display = 'block';
+  }
+
+  function revealStream() {
+    if (streamBody && streamBody.style.display === 'none') {
+      streamBody.style.display = '';
+      const thinking = streamCard && streamCard.querySelector('.thinking');
+      if (thinking) thinking.remove();
+    }
+  }
+
+  function handleEvent(event) {
+    if (event.type === 'token' && streaming) {
+      streamText += event.delta;
+      revealStream();
+      streamBody.textContent = cleanMarkdown(streamText);
+      scrollBottom();
+      return;
+    }
+    if (event.type === 'done') {
+      if (streaming) {
+        revealStream();
+        streamBody.textContent = cleanMarkdown(event.answer || streamText);
+        addSources(streamCard, event.citations);
+        streamText = '';
+        streamBody = null;
+        streamCard = null;
+        streaming = false;
+        conversationId = event.conversation_id;
+        setBusy(false);
+      }
+      return;
+    }
+    if (event.type === 'error') {
+      showError(event.message || 'Something went wrong. Please try again.');
+      if (streamCard) { streamCard.remove(); streamCard = null; streamBody = null; }
+      streaming = false;
+      setBusy(false);
+    }
+  }
+
+  function addSources(container, citations) {
+    if (!citations || !citations.length) return;
+    const details = document.createElement('details');
+    details.className = 'sources';
+    const summary = document.createElement('summary');
+    summary.textContent = 'Sources (' + citations.length + ')';
+    const chips = document.createElement('div');
+    chips.className = 'chips';
+    citations.forEach(function (c) { chips.appendChild(citationChip(c)); });
+    details.appendChild(summary);
+    details.appendChild(chips);
+    container.appendChild(details);
+  }
+
+  async function streamChat(message) {
+    const response = await fetch('/api/chat/stream', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-CSRFToken': csrf
+      },
+      body: JSON.stringify({ message: message, conversation_id: conversationId || null }),
+      credentials: 'same-origin'
+    });
+    if (!response.ok) {
+      let detail = 'Could not reach the chat server.';
+      try { detail = (await response.json()).error || detail; } catch (e) {}
+      throw new Error(detail);
+    }
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let idx;
+      while ((idx = buffer.indexOf('\n\n')) !== -1) {
+        const block = buffer.slice(0, idx);
+        buffer = buffer.slice(idx + 2);
+        if (!block.startsWith('data: ')) continue;
+        let event;
+        try { event = JSON.parse(block.slice(6)); } catch (e) { continue; }
+        handleEvent(event);
+        if (event.type === 'done' || event.type === 'error') return;
+      }
+    }
+  }
+
+  async function fallbackChat(message) {
+    const response = await fetch('/api/chat', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-CSRFToken': csrf
+      },
+      body: JSON.stringify({ message: message, conversation_id: conversationId || null }),
+      credentials: 'same-origin'
+    });
+    const data = await response.json().catch(function () { return {}; });
+    if (!response.ok) {
+      handleEvent({ type: 'error', message: data.error || 'The chat server returned an error.' });
+      return;
+    }
+    handleEvent({
+      type: 'done',
+      conversation_id: data.conversation_id,
+      answer: data.answer,
+      citations: data.citations
+    });
+  }
+
+  function setBusy(busy) {
+    sendBtn.disabled = busy;
+    input.disabled = busy;
+    if (!busy) input.focus();
+  }
+
+  scrollBottom();
+  document.querySelectorAll('.bubble.assistant > div:first-child').forEach(function (el) {
+    el.textContent = cleanMarkdown(el.textContent);
+  });
+  form.addEventListener('submit', async function (event) {
+    event.preventDefault();
+    const message = input.value.trim();
+    if (!message || streaming) return;
+    errorBox.style.display = 'none';
+
+    thread.appendChild(bubble('user', message));
+    scrollBottom();
+    input.value = '';
+
+    streamText = '';
+    streamCard = document.createElement('div');
+    streamCard.className = 'bubble assistant';
+    const thinking = document.createElement('div');
+    thinking.className = 'thinking';
+    thinking.textContent = 'Searching documents…';
+    streamCard.appendChild(thinking);
+    streamBody = document.createElement('div');
+    streamBody.style.display = 'none';
+    streamCard.appendChild(streamBody);
+    thread.appendChild(streamCard);
+    scrollBottom();
+    streaming = true;
+    setBusy(true);
+
+    try {
+      await streamChat(message);
+      if (streaming) {
+        // Stream ended without a definitive event; fall back to one request/response.
+        streamCard.remove(); streamCard = null; streamBody = null;
+        streamText = ''; streaming = false;
+        await fallbackChat(message);
+      }
+    } catch (err) {
+      if (streamCard) { streamCard.remove(); streamCard = null; streamBody = null; }
+      streamText = ''; streaming = false;
+      try {
+        await fallbackChat(message);
+      } catch (fallbackErr) {
+        showError(err.message || 'Could not reach the chat server.');
+        setBusy(false);
+      }
+    }
+  });
+})();
+</script>
+{% endblock %}

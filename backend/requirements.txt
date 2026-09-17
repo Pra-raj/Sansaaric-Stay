@@ -1,0 +1,15 @@
+Django>=6.0,<7.0
+djangorestframework
+python-dotenv
+psycopg[binary]
+gunicorn
+django-storages[boto3]
+pgvector
+pandas
+sentence-transformers
+langchain-core
+langchain-openai
+langchain-cohere
+langchain-text-splitters
+unstructured[pdf,docx]
+python-magic

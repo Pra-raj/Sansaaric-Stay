@@ -1,0 +1,150 @@
+{% load static %}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}RAG Chat{% endblock %}</title>
+<style>
+  :root {
+    --bg: #f6f7f9;
+    --panel: #ffffff;
+    --ink: #1c1e21;
+    --muted: #6b7280;
+    --line: #e5e7eb;
+    --accent: #2563eb;
+    --accent-ink: #ffffff;
+    --ok: #16a34a;
+    --warn: #9333ea;
+    --fail: #dc2626;
+    --running: #2563eb;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--ink);
+  }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  header {
+    background: var(--panel);
+    border-bottom: 1px solid var(--line);
+    padding: 0 24px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    height: 56px;
+  }
+  header .brand { font-weight: 650; letter-spacing: 0.2px; }
+  header nav { display: flex; align-items: center; gap: 18px; }
+  header nav a { color: var(--muted); font-size: 14px; }
+  header nav a.active, header nav a:hover { color: var(--ink); text-decoration: none; }
+  main { max-width: 1080px; margin: 0 auto; padding: 28px 24px 64px; }
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 20px;
+    margin-bottom: 22px;
+  }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  h2 { font-size: 16px; margin: 0 0 14px; }
+  .muted { color: var(--muted); }
+  .desc { margin: 0 0 16px; color: var(--muted); font-size: 14px; }
+  button, .btn {
+    font: inherit;
+    border: 1px solid var(--line);
+    background: var(--panel);
+    color: var(--ink);
+    padding: 8px 14px;
+    border-radius: 8px;
+    cursor: pointer;
+  }
+  button:hover, .btn:hover { background: #f3f4f6; text-decoration: none; }
+  button.primary, .btn.primary {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--accent-ink);
+  }
+  button.primary:hover, .btn.primary:hover { background: #1d4ed8; }
+  button.danger, .btn.danger { color: var(--fail); }
+  button.danger:hover, .btn.danger:hover { background: #fef2f2; }
+  button:disabled { opacity: 0.5; cursor: default; }
+  label { display: block; font-size: 13px; font-weight: 600; margin: 0 0 6px; color: var(--ink); }
+  input[type=text], textarea, input[type=file] {
+    font: inherit;
+    width: 100%;
+    padding: 9px 11px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: #fff;
+    color: var(--ink);
+  }
+  textarea { resize: vertical; min-height: 72px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
+  input:focus, textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .form-grid .full { grid-column: 1 / -1; }
+  .errors { color: var(--fail); font-size: 13px; margin: 10px 0 0; }
+  .errors ul { margin: 4px 0 0; padding-left: 18px; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+  th { font-size: 12px; text-transform: uppercase; letter-spacing: 0.4px; color: var(--muted); }
+  .row-actions { display: flex; gap: 8px; white-space: nowrap; }
+  .chip {
+    display: inline-block;
+    padding: 2px 10px;
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 600;
+  }
+  .chip-pending { background: #f3f4f6; color: var(--muted); }
+  .chip-processing { background: #dbeafe; color: var(--running); }
+  .chip-ready { background: #dcfce7; color: var(--ok); }
+  .chip-failed { background: #fee2e2; color: var(--fail); }
+  .error-tip {
+    color: var(--fail);
+    cursor: help;
+    border-bottom: 1px dotted currentColor;
+  }
+  .empty { text-align: center; color: var(--muted); padding: 26px 0; }
+  .login-card { max-width: 380px; margin: 48px auto; }
+  .login-card .panel { padding: 28px; }
+  .flash { margin: 0 0 14px; padding: 10px 14px; border-radius: 8px; font-size: 14px; }
+  .flash-success { background: #dcfce7; color: var(--ok); }
+  .flash-error { background: #fee2e2; color: var(--fail); }
+</style>
+{% block head %}{% endblock %}
+</head>
+<body>
+<header>
+  <span class="brand">RAG Chat</span>
+  <nav>
+    {% if not request.user.is_staff %}
+      <a href="/">Chat</a>
+    {% endif %}
+    {% if request.user.is_staff %}
+      <a href="{% url 'docadmin_chats' %}" class="{% if request.resolver_match and request.resolver_match.url_name == 'docadmin_chats' %}active{% endif %}">User chats</a>
+      <a href="{% url 'docadmin' %}" class="{% if request.resolver_match and request.resolver_match.url_name == 'docadmin' %}active{% endif %}">Admin docs</a>
+    {% endif %}
+    {% if request.user.is_authenticated %}
+      <form method="post" action="{% url 'logout' %}" style="display:inline; margin:0;">
+        {% csrf_token %}
+        <button type="submit" style="background:none; border:none; color:var(--muted); padding:0; cursor:pointer; font-size:14px;">Logout</button>
+      </form>
+    {% else %}
+      <a href="{% url 'login' %}">Login</a>
+    {% endif %}
+  </nav>
+</header>
+<main>
+  {% if messages %}
+    {% for message in messages %}
+      <div class="flash flash-{{ message.tags }}">{{ message }}</div>
+    {% endfor %}
+  {% endif %}
+  {% block content %}{% endblock %}
+</main>
+</body>
+</html>

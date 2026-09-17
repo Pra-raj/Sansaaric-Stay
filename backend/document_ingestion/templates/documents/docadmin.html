@@ -1,0 +1,126 @@
+{% extends "base.html" %}
+{% block title %}Admin Docs · RAG Chat{% endblock %}
+{% block content %}
+
+<div class="panel">
+  <h1>Upload &amp; train documents</h1>
+  <p class="desc">Files are stored in Supabase Storage and trained (chunked + embedded) by the background worker. Supported: PDF, DOCX, XLSX, XLS, CSV, TXT, MD.</p>
+  <form method="post" enctype="multipart/form-data" action="{% url 'docadmin' %}" id="upload-form">
+    {% csrf_token %}
+    <div class="form-grid">
+      <div>
+        <label for="id_title">Title (optional)</label>
+        <input type="text" name="title" id="id_title" placeholder="Applied to all files; falls back to file name">
+      </div>
+      <div>
+        <label for="id_files">Files</label>
+        <input type="file" name="files" id="id_files" multiple required>
+      </div>
+    </div>
+    {% if form.errors %}
+      <div class="errors">
+        <ul>
+          {% for field, errors in form.errors.items %}{% for error in errors %}<li>{% if field != "__all__" %}{{ field|title }}: {% endif %}{{ error }}</li>{% endfor %}{% endfor %}
+        </ul>
+      </div>
+    {% endif %}
+    <div style="margin-top:16px;"><button type="submit" class="primary">Upload &amp; train</button></div>
+  </form>
+</div>
+
+<div class="panel">
+  <div style="display:flex; align-items:baseline; justify-content:space-between;">
+    <h2>Documents</h2>
+    <span class="muted" id="poll-note" style="font-size:12px;">auto-refreshes</span>
+  </div>
+  <table>
+    <thead>
+      <tr>
+        <th>Title</th>
+        <th>File</th>
+        <th>Status</th>
+        <th>Chunks</th>
+        <th>Pages</th>
+        <th>Uploaded</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody id="doc-table">
+      <tr><td colspan="7" class="empty">Loading…</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<input type="hidden" name="csrfmiddlewaretoken" value="{{ csrf_token }}">
+
+<script>
+(function () {
+  const tbody = document.getElementById('doc-table');
+  const token = document.querySelector('input[name=csrfmiddlewaretoken]').value;
+
+  function esc(value) {
+    const div = document.createElement('div');
+    div.textContent = value == null ? '' : String(value);
+    return div.innerHTML;
+  }
+
+  function fmtSize(bytes) {
+    if (bytes == null) return '—';
+    const units = ['B', 'KB', 'MB', 'GB'];
+    let i = 0, n = bytes;
+    while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+    return n.toFixed(i === 0 ? 0 : 1) + ' ' + units[i];
+  }
+
+  function fmtDate(value) {
+    if (!value) return '—';
+    const date = new Date(value);
+    return date.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+  }
+
+  function chip(status) {
+    return '<span class="chip chip-' + esc(status) + '">' + esc(status) + '</span>';
+  }
+
+  function row(doc) {
+    const errorTip = doc.error
+      ? '<span class="error-tip" title="' + esc(doc.error).replace(/"/g, '&quot;') + '">failed</span>'
+      : chip('ready');
+    const statusCell = doc.status === 'failed' ? errorTip : chip(doc.status);
+
+    const train = '<form method="post" action="' + esc('/docadmin/train/' + doc.document_id + '/') + '" style="display:inline; margin:0;">'
+      + '<input type="hidden" name="csrfmiddlewaretoken" value="' + token + '">'
+      + '<button type="submit" ' + (doc.status === 'processing' ? 'disabled' : '') + '>Re-train</button></form>';
+    const del = '<form method="post" action="' + esc('/docadmin/delete/' + doc.document_id + '/') + '" style="display:inline; margin:0;" onsubmit="return confirm(\'Delete "' + esc(doc.title) + '" and its chunks permanently?\');">'
+      + '<input type="hidden" name="csrfmiddlewaretoken" value="' + token + '">'
+      + '<button type="submit" class="danger">Delete</button></form>';
+
+    return '<tr>'
+      + '<td><strong>' + esc(doc.title) + '</strong></td>'
+      + '<td><span>' + esc(doc.file_name) + '</span><div class="muted" style="font-size:12px;">' + esc(doc.file_type) + ' · ' + fmtSize(doc.file_size) + '</div></td>'
+      + '<td>' + statusCell + '</td>'
+      + '<td>' + (doc.chunk_count != null ? doc.chunk_count : '—') + '</td>'
+      + '<td>' + (doc.page_count ? doc.page_count : '—') + '</td>'
+      + '<td>' + fmtDate(doc.created_at) + '</td>'
+      + '<td><div class="row-actions">' + train + del + '</div></td>'
+      + '</tr>';
+  }
+
+  async function refresh() {
+    try {
+      const response = await fetch('/docadmin/status/', { headers: { 'Accept': 'application/json' } });
+      if (!response.ok) throw new Error('status ' + response.status);
+      const docs = await response.json();
+      tbody.innerHTML = docs.length
+        ? docs.map(row).join('')
+        : '<tr><td colspan="7" class="empty">No documents yet — upload something above.</td></tr>';
+    } catch (err) {
+      tbody.innerHTML = '<tr><td colspan="7" class="empty">Could not reach the status endpoint: ' + esc(err.message) + '</td></tr>';
+    }
+  }
+
+  refresh();
+  setInterval(refresh, 2500);
+})();
+</script>
+{% endblock %}

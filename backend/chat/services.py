@@ -15,7 +15,6 @@ from django.contrib.postgres.search import SearchQuery, SearchRank
 from langchain_cohere import CohereRerank
 from langchain_core.documents import Document
 from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_openai import ChatOpenAI
 from pgvector.django import CosineDistance
 
 from document_ingestion.ingestion.embedding import embed_texts
@@ -128,6 +127,7 @@ class ModelPool:
 
         def probe(model):
             try:
+                from langchain_openai import ChatOpenAI
                 llm = ChatOpenAI(
                     model=model,
                     api_key=api_key,

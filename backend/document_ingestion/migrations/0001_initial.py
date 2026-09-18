@@ -13,7 +13,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ("documents", "0001_pgvector_extension"),
+        ("document_ingestion", "0001_pgvector_extension"),
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
     ]
 
@@ -48,7 +48,7 @@ class Migration(migrations.Migration):
                 ('search_vector', django.contrib.postgres.search.SearchVectorField(null=True)),
                 ('chunk_index', models.IntegerField()),
                 ('metadata', models.JSONField(blank=True, default=dict)),
-                ('document', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='chunks', to='documents.referencedocument')),
+                ('document', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='chunks', to='document_ingestion.referencedocument')),
             ],
             options={
                 'ordering': ['chunk_index'],

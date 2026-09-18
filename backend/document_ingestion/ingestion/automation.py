@@ -52,8 +52,10 @@ class _Worker:
         try:
             from document_ingestion.models import ReferenceDocument
 
-            pending = ReferenceDocument.objects.filter(status="pending")
-            for document in pending:
+            # pending: uploaded but never trained; processing: orphaned by a run
+            # that was interrupted (server reload / crash) before finishing.
+            stuck = ReferenceDocument.objects.filter(status__in=["pending", "processing"])
+            for document in stuck:
                 self._process(str(document.document_id))
         except Exception:
             logger.exception("Pending-document sweep failed")
@@ -73,6 +75,11 @@ class _Worker:
 
 
 _worker = _Worker()
+
+
+def ensure_worker_started():
+    """Start the ingestion worker (and its pending/processing sweep) once."""
+    _worker.start()
 
 
 def enqueue_run(document_id):

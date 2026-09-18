@@ -1,4 +1,4 @@
-Django>=6.0,<7.0
+Django
 djangorestframework
 python-dotenv
 psycopg[binary]

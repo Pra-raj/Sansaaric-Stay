@@ -5,8 +5,6 @@ import os
 import tempfile
 
 import pandas as pd
-from unstructured.partition.docx import partition_docx
-from unstructured.partition.pdf import partition_pdf
 
 SUPPORTED_TYPES = {"pdf", "docx", "txt", "md", "csv", "xlsx", "xls"}
 
@@ -31,8 +29,10 @@ def load_source(file_content, filename, file_type):
         raise ValueError(f"Unsupported file type: {ftype!r}")
 
     if ftype == "pdf":
+        from unstructured.partition.pdf import partition_pdf
         return _partition_file(partition_pdf, file_content, filename, strategy="hi_res", infer_table_structure=True)
     if ftype == "docx":
+        from unstructured.partition.docx import partition_docx
         return _partition_file(partition_docx, file_content, filename)
     if ftype in ("xlsx", "xls"):
         return TextDocument(_excel_to_text(file_content))

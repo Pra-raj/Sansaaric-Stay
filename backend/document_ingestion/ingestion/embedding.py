@@ -2,8 +2,6 @@
 
 import threading
 
-from sentence_transformers import SentenceTransformer
-
 EMBEDDING_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 EMBEDDING_DIMENSIONS = 384
 
@@ -16,6 +14,7 @@ def get_embedder():
     if _model is None:
         with _lock:
             if _model is None:
+                from sentence_transformers import SentenceTransformer
                 _model = SentenceTransformer(EMBEDDING_MODEL_NAME)
     return _model
 

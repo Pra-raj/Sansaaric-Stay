@@ -55,7 +55,9 @@ INSTALLED_APPS = [
 ]
 
 MIDDLEWARE = [
+    'chat.middleware.RequestLoggingMiddleware',
     'django.middleware.security.SecurityMiddleware',
+    'whitenoise.middleware.WhiteNoiseMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'corsheaders.middleware.CorsMiddleware',
     'django.middleware.common.CommonMiddleware',
@@ -98,7 +100,7 @@ DATABASES = {
         "PASSWORD": os.getenv("SUPABASE_DB_PASSWORD"),
         "HOST": os.getenv("SUPABASE_DB_HOST"),
         "PORT": os.getenv("SUPABASE_DB_PORT", "5432"),
-        "OPTIONS": {"sslmode": "require"},
+        "OPTIONS": {"sslmode": os.getenv("SUPABASE_DB_SSLMODE", "require")},
         "CONN_MAX_AGE": 60,
         "CONN_HEALTH_CHECKS": True,
     }
@@ -123,7 +125,7 @@ STORAGES = {
         },
     },
     "staticfiles": {
-        "BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage",
+        "BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage",
     },
 }
 
@@ -163,16 +165,64 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/6.1/howto/static-files/
 
 STATIC_URL = 'static/'
+STATIC_ROOT = BASE_DIR / 'staticfiles'
+
+
+# Logging
+# https://docs.djangoproject.com/en/6.1/topics/logging/
+
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'formatters': {
+        'verbose': {
+            'format': '[{asctime}] {levelname} {name} {process:d}/{thread:d} {message}',
+            'style': '{',
+        },
+    },
+    'handlers': {
+        'console': {
+            'class': 'logging.StreamHandler',
+            'formatter': 'verbose',
+        },
+    },
+    'root': {
+        'handlers': ['console'],
+        'level': LOG_LEVEL,
+    },
+    'loggers': {
+        'django': {
+            'handlers': ['console'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+        'chat': {
+            'handlers': ['console'],
+            'level': LOG_LEVEL,
+            'propagate': False,
+        },
+        'chat.request': {
+            'handlers': ['console'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+        'document_ingestion': {
+            'handlers': ['console'],
+            'level': LOG_LEVEL,
+            'propagate': False,
+        },
+    },
+}
 
 
 # Email
 # https://docs.djangoproject.com/en/6.1/topics/email/#topic-email-configuration
+# Dev backend prints emails (e.g. password reset) to the console. Override with
+# EMAIL_BACKEND in production (e.g. django.core.mail.backends.smtp.EmailBackend).
 
-MAILERS = {
-    'default': {
-        'BACKEND': 'django.core.mail.backends.console.EmailBackend',
-    },
-}
+EMAIL_BACKEND = "django.core.mail.backends.console.EmailBackend"
 
 # Supabase Auth (GoTrue) + DRF
 # Read the values from backend/.env (untracked). Verification is asymmetric:

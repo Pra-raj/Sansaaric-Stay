@@ -17,4 +17,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 EXPOSE 8000
-CMD ["gunicorn", "config.wsgi:application", "--bind", "0.0.0.0:8000"]
+CMD ["sh", "-c", "python manage.py collectstatic --noinput && \
+     gunicorn config.wsgi:application --bind 0.0.0.0:8000 \
+     --workers ${GUNICORN_WORKERS:-2} \
+     --worker-class gthread \
+     --threads ${GUNICORN_THREADS:-8} \
+     --timeout ${GUNICORN_TIMEOUT:-120} \
+     --graceful-timeout ${GUNICORN_GRACEFUL_TIMEOUT:-60}"]

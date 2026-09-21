@@ -48,6 +48,9 @@ Desktop.ini
 *.tgz
 *.zip
 
+# Django static build output (WhiteNoise collectstatic)
+backend/staticfiles/
+
 # ML / model artifacts
 *.pt
 *.pth

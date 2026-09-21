@@ -32,6 +32,7 @@ class ReferenceDocument(models.Model):
     file_size = models.BigIntegerField(default=0)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="pending")
     error = models.TextField(blank=True, default="")
+    worker_heartbeat = models.DateTimeField(null=True, blank=True)
     uploaded_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         null=True,

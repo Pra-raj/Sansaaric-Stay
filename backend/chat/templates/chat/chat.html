@@ -29,7 +29,7 @@
   <div class="panel">
     <div class="chat-head">
       <h1>Chat with your documents</h1>
-      <a class="btn" href="/">New chat</a>
+      <a class="btn" href="/?new=1">New chat</a>
     </div>
     <div class="chat-error" id="chat-error"></div>
     <div class="thread" id="thread">
@@ -172,7 +172,7 @@
         'Content-Type': 'application/json',
         'X-CSRFToken': csrf
       },
-      body: JSON.stringify({ message: message, conversation_id: conversationId || null }),
+      body: JSON.stringify({ message: message, conversation_id: conversationId || null, new: conversationId === 0 }),
       credentials: 'same-origin'
     });
     if (!response.ok) {
@@ -207,7 +207,7 @@
         'Content-Type': 'application/json',
         'X-CSRFToken': csrf
       },
-      body: JSON.stringify({ message: message, conversation_id: conversationId || null }),
+      body: JSON.stringify({ message: message, conversation_id: conversationId || null, new: conversationId === 0 }),
       credentials: 'same-origin'
     });
     const data = await response.json().catch(function () { return {}; });

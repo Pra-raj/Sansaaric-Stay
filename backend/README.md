@@ -18,8 +18,13 @@ chat (web + API)   ──►  retrieve: hybrid (pgvector + full-text) search
 
 - **Database:** Supabase PostgreSQL with the `pgvector` extension.
 - **Storage:** Supabase S3-compatible bucket (`document`), wired through `django-storages`.
-- **Worker:** training runs **in-process** via a daemon thread — no Celery/qcluster/broker required.
-  On startup it sweeps `pending` (and orphaned `processing`) documents and retrains them automatically.
+- **Worker:** training runs in a **dedicated `python manage.py trainworker`**
+  process that polls the database (`FOR UPDATE SKIP LOCKED`) and claims
+  documents with a crash-safe heartbeat — no Celery/qcluster/broker required.
+  Web processes only mark documents `pending`; a crashed worker's orphaned
+  `processing` documents are reclaimed once their heartbeat goes stale.
+  For single-process dev you can set `INGESTION_EMBEDDED_WORKER=1` to run the
+  worker as a thread inside the web process.
 - **Models:** `ReferenceDocument` + `Chunk` (embedding `vector(384)`, HNSW index, full-text index), `Conversation` + `Message` (with citations).
 
 ---
@@ -57,6 +62,7 @@ cp .env.example .env
 | `SUPABASE_DB_NAME` | no | Default `postgres` |
 | `SUPABASE_DB_USER` | yes | DB user |
 | `SUPABASE_DB_PASSWORD` | yes | DB password |
+| `SUPABASE_DB_SSLMODE` | no | `require` (default, Supabase). Use `prefer`/`disable` for local/CI test DBs |
 | `SUPABASE_S3_ENDPOINT` | yes | S3-compatible endpoint |
 | `SUPABASE_S3_ACCESS_KEY` | yes | Storage access key |
 | `SUPABASE_S3_SECRET_KEY` | yes | Storage secret key |
@@ -64,6 +70,7 @@ cp .env.example .env
 | `SUPABASE_S3_REGION` | no | Default `us-east-1` |
 | `GROQ_API_KEY` | yes | Groq LLM provider |
 | `COHERE_API_KEY` | no | Enables reranking if present (skipped otherwise) |
+| `MAX_UPLOAD_SIZE_MB` | no | Per-file upload cap at `/docadmin/` (default `50`) |
 
 ## 2. Install dependencies
 
@@ -97,6 +104,10 @@ python manage.py runserver
 
 The server is available at http://127.0.0.1:8000.
 
+> **Document training needs a worker.** Either run the worker in a second
+> terminal (`python manage.py trainworker`) or set `INGESTION_EMBEDDED_WORKER=1`
+> in `.env` to run it inside the web process (single-process dev convenience).
+
 ---
 
 ## URLs
@@ -106,6 +117,7 @@ The server is available at http://127.0.0.1:8000.
 | `/` | Chat page | anyone |
 | `/api/chat` | Non-streaming answer (POST JSON) | anyone |
 | `/api/chat/stream` | SSE-streamed answer (POST JSON) | anyone |
+| `/healthz` | Liveness probe (checks DB connectivity) | anyone |
 | `/docadmin/` | Upload / train / delete documents | staff (login required) |
 | `/docadmin/status/` | Document + chunk status JSON | staff |
 | `/docadmin/chats/` | Review user conversations | staff |
@@ -142,7 +154,13 @@ data: {"type": "done", "answer": "...", "citations": [...]}
 ```
 
 All POSTs use JSON bodies that include the message and an optional
-`conversation_id` to continue a thread.
+`conversation_id` to continue a thread. anonymous/authenticated identities are
+throttled to 12 chats/minute (DB-backed, returns `429`); messages over
+4,000 characters are rejected.
+
+History-free questions (first turn of a thread, FAQ-style) are served from a
+process-local answer cache (30-minute TTL) to cut LLM spend; follow-up turns
+bypass it automatically.
 
 ## Training documents
 
@@ -158,15 +176,43 @@ button re-runs the pipeline. Downloads are only queryable once status is `ready`
 ## Docker
 
 The included `Dockerfile` runs the app with **gunicorn** and installs the
-document-parsing system libraries. To run everything (backend + frontend) from
-the repository root:
+document-parsing system libraries. To run everything (backend + frontend +
+training worker) from the repository root:
 
 ```bash
 docker compose up --build
 ```
 
 This mounts `./backend` into the container, applies migrations on start, and
-runs the dev server on port 8000. The container reads `./backend/.env`.
+runs the dev server on port 8000 plus a dedicated `trainworker` container. The
+containers read `./backend/.env`. The backend service has a `/healthz`
+health-check wired into `docker compose`.
+
+For production the `Dockerfile` runs **gunicorn** (2 workers × 8 threads, 120s
+timeout — overridable via `GUNICORN_WORKERS`/`GUNICORN_THREADS`/
+`GUNICORN_TIMEOUT`/`GUNICORN_GRACEFUL_TIMEOUT`) with `collectstatic` on boot;
+static files are served by **WhiteNoise** (`CompressedManifest`), so no nginx
+is required for a single-container deployment.
+
+## Tests
+
+The suite covers the chat API (validation, rate limiting, cache, streaming,
+history pairing) and document ingestion (cleaning, tables, loaders, chunking,
+upload limits, worker claim/staleness). DB-backed tests need Postgres with
+pgvector; unit tests run against a plain local install.
+
+```bash
+# against a local pgvector Postgres (e.g. via docker):
+docker run -d --name test-pg -e POSTGRES_PASSWORD=postgres \
+  -p 5432:5432 pgvector/pgvector:pg16
+
+SUPABASE_DB_HOST=127.0.0.1 SUPABASE_DB_PORT=5432 \
+SUPABASE_DB_USER=postgres SUPABASE_DB_PASSWORD=postgres \
+SUPABASE_DB_SSLMODE=prefer python manage.py test chat document_ingestion
+```
+
+CI (`.github/workflows/ci.yml`) runs the same checks against a pgvector service
+container.
 
 ## Project layout
 
@@ -191,9 +237,10 @@ backend/
 - **Dev server takes forever to start** — first boot loads torch/unstructured
   only when first needed; subsequent startups are fast. Never remove the lazy
   imports in `embedding.py` / `loaders.py` / `chat/services.py`.
-- **Document stuck on `processing`** — a run interrupted by a server restart
-  leaves a `processing` orphan. The startup sweep now re-trains these
-  automatically; a server restart is enough to recover them.
+- **Document stuck on `processing`** — the worker refreshes a heartbeat while
+  training; if the worker is killed mid-run the document is reclaimed once its
+  heartbeat goes stale (about 2 minutes). Just wait or restart the worker and
+  the document resumes automatically.
 - **DB migrated under the old `documents` app name** — tables were renamed to
   `document_ingestion_*` and the `document_ingestion` migrations recorded as
   applied. If you ever need to rebuild from scratch:

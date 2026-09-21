@@ -9,7 +9,7 @@ from django.contrib.postgres.search import SearchVector
 from django.db import transaction
 from django.utils import timezone
 
-from .cleaning import clean_text, dedupe, drop_empty
+from .cleaning import dedupe, drop_empty
 from .chunking import chunk_elements
 from .embedding import embed_texts
 from .loaders import SUPPORTED_TYPES, load_source

@@ -40,13 +40,12 @@
         <th>File</th>
         <th>Status</th>
         <th>Chunks</th>
-        <th>Pages</th>
         <th>Uploaded</th>
         <th></th>
       </tr>
     </thead>
     <tbody id="doc-table">
-      <tr><td colspan="7" class="empty">Loading…</td></tr>
+      <tr><td colspan="6" class="empty">Loading…</td></tr>
     </tbody>
   </table>
 </div>
@@ -100,7 +99,6 @@
       + '<td><span>' + esc(doc.file_name) + '</span><div class="muted" style="font-size:12px;">' + esc(doc.file_type) + ' · ' + fmtSize(doc.file_size) + '</div></td>'
       + '<td>' + statusCell + '</td>'
       + '<td>' + (doc.chunk_count != null ? doc.chunk_count : '—') + '</td>'
-      + '<td>' + (doc.page_count ? doc.page_count : '—') + '</td>'
       + '<td>' + fmtDate(doc.created_at) + '</td>'
       + '<td><div class="row-actions">' + train + del + '</div></td>'
       + '</tr>';
@@ -113,9 +111,9 @@
       const docs = await response.json();
       tbody.innerHTML = docs.length
         ? docs.map(row).join('')
-        : '<tr><td colspan="7" class="empty">No documents yet — upload something above.</td></tr>';
+        : '<tr><td colspan="6" class="empty">No documents yet — upload something above.</td></tr>';
     } catch (err) {
-      tbody.innerHTML = '<tr><td colspan="7" class="empty">Could not reach the status endpoint: ' + esc(err.message) + '</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="6" class="empty">Could not reach the status endpoint: ' + esc(err.message) + '</td></tr>';
     }
   }
 

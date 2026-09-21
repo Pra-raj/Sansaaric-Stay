@@ -3,7 +3,7 @@ import os
 from django import forms
 from django.contrib import messages
 from django.contrib.admin.views.decorators import staff_member_required
-from django.db.models import Count, Max
+from django.db.models import Count
 from django.http import Http404, JsonResponse
 from django.shortcuts import redirect, render
 from django.urls import reverse
@@ -11,6 +11,9 @@ from django.views.decorators.http import require_POST
 
 from .ingestion.loaders import SUPPORTED_TYPES
 from .models import ReferenceDocument
+
+# Reject uploads above this size before they hit object storage or the parser.
+MAX_UPLOAD_SIZE = int(os.getenv("MAX_UPLOAD_SIZE_MB", "50")) * 1024 * 1024
 
 
 class MultipleFileInput(forms.ClearableFileInput):
@@ -40,6 +43,12 @@ class UploadForm(forms.Form):
         for uploaded in cleaned.get("files", []):
             name = os.path.basename(uploaded.name)
             ftype = os.path.splitext(name)[1].lower().lstrip(".")
+            if uploaded.size > MAX_UPLOAD_SIZE:
+                self.add_error(
+                    "files",
+                    f"{name}: exceeds the {MAX_UPLOAD_SIZE // (1024 * 1024)} MB "
+                    "maximum upload size.",
+                )
             if not ftype:
                 self.add_error("files", f"{name}: file has no extension.")
             elif ftype not in SUPPORTED_TYPES:
@@ -85,18 +94,6 @@ def docadmin(request):
             created.append(document)
 
         for document in created:
-            try:
-                from django.db import connections
-                from .ingestion.automation import enqueue_run
-
-                enqueue_run(str(document.document_id))
-                connections.close_all()
-            except Exception:
-                messages.error(
-                    request,
-                    f"{document.file_name}: saved but could not be queued.",
-                )
-                continue
             messages.success(request, f"Queued {document.file_name} for training.")
 
         if len(created) == 1:
@@ -111,14 +108,9 @@ def docadmin(request):
 @staff_json_required
 def docadmin_status(request):
     queryset = ReferenceDocument.objects.annotate(chunk_count=Count("chunks"))
-    page_count_ok = True
-    try:
-        queryset = queryset.annotate(page_count=Max("metadata__page"))
-    except Exception:
-        page_count_ok = False
 
     def to_dict(document):
-        payload = {
+        return {
             "document_id": str(document.document_id),
             "title": document.title,
             "file_name": document.file_name,
@@ -129,9 +121,6 @@ def docadmin_status(request):
             "chunk_count": document.chunk_count,
             "created_at": document.created_at.isoformat(),
         }
-        if page_count_ok:
-            payload["page_count"] = document.page_count
-        return payload
 
     return JsonResponse([to_dict(doc) for doc in queryset], safe=False)
 
@@ -144,15 +133,12 @@ def docadmin_train(request, document_id):
     except ReferenceDocument.DoesNotExist:
         raise Http404("Document not found")
 
-    try:
-        from django.db import connections
-        from .ingestion.automation import enqueue_run
-
-        enqueue_run(str(document.document_id))
-        connections.close_all()
-        messages.success(request, f"Queued {document.file_name} for re-training.")
-    except Exception:
-        messages.error(request, f"Could not queue {document.file_name} for training.")
+    if document.status != "pending":
+        ReferenceDocument.objects.filter(pk=document.pk).update(
+            status="pending",
+            error="",
+        )
+    messages.success(request, f"Queued {document.file_name} for re-training.")
     return redirect(reverse("docadmin"))
 
 

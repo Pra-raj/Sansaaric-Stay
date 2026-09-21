@@ -123,7 +123,6 @@ class ModelPool:
         self.models = models
         self.instances = []
         errors = []
-        self.scale = []
 
         def probe(model):
             try:
@@ -135,7 +134,7 @@ class ModelPool:
                     default_headers={"User-Agent": GROQ_USER_AGENT},
                     temperature=0,
                     max_retries=0,
-                    timeout=120,
+                    timeout=60,
                 )
                 llm.invoke([HumanMessage(content="Reply with exactly: OK")])
                 return llm
@@ -213,7 +212,13 @@ class ModelPool:
         )
 
     def stream(self, messages, max_tokens=None):
-        """Yield answer tokens. Falls back to a buffered completion on error."""
+        """Yield answer tokens.
+
+        If no token has been emitted yet, an error falls back to a buffered
+        completion. After any token is emitted, an error aborts the stream
+        (re-raised) instead of duplicating the already-streamed text.
+        """
+        emitted = False
         try:
             stream = self._invoke(
                 lambda: self.current.stream(messages, max_tokens=max_tokens)
@@ -221,9 +226,12 @@ class ModelPool:
             for chunk in stream:
                 text = extract_text(getattr(chunk, "content", ""))
                 if text:
+                    emitted = True
                     yield text
             return
         except Exception:
+            if emitted:
+                raise
             text = self.invoke_text(messages, max_tokens=max_tokens)
             if text:
                 yield text
@@ -232,6 +240,44 @@ class ModelPool:
 _pool_lock = threading.Lock()
 _pool = None
 _reranker = None
+
+
+# Process-local answer cache. Only used for history-free questions (first turn,
+# FAQ-style), where the answer is independent of context. TTL keeps stale
+# answers from surviving corpus retraining for long. Not shared across
+# processes; harmless to disable (delete) for clustered deployments until a
+# shared store (Redis) is introduced.
+
+ANSWER_CACHE_TTL_SECONDS = 1800      # 30 minutes
+ANSWER_CACHE_MAX_ENTRIES = 2000
+_cache_lock = threading.Lock()
+_answer_cache = {}                   # normalized question -> (ts, answer, citations)
+
+
+def _cache_key(question):
+    return " ".join((question or "").casefold().split())
+
+
+def cached_answer(question):
+    """Return (answer, citations) for an exact prior question, or None."""
+    with _cache_lock:
+        entry = _answer_cache.get(_cache_key(question))
+        if entry is None:
+            return None
+        ts, answer, citations = entry
+        if time.time() - ts > ANSWER_CACHE_TTL_SECONDS:
+            _answer_cache.pop(_cache_key(question), None)
+            return None
+        return answer, citations
+
+
+def cache_answer(question, answer, citations):
+    """Store an answer keyed by the normalized question (bounded size)."""
+    key = _cache_key(question)
+    with _cache_lock:
+        if len(_answer_cache) >= ANSWER_CACHE_MAX_ENTRIES and key not in _answer_cache:
+            _answer_cache.pop(next(iter(_answer_cache)))
+        _answer_cache[key] = (time.time(), answer, citations)
 
 
 def get_model_pool():
@@ -259,6 +305,27 @@ def get_reranker():
                 else:
                     _reranker = CohereRerank(model="rerank-english-v3.0", top_n=TOP_N)
     return _reranker or None
+
+
+def prewarm_pipeline():
+    """Load the embedding model and probe the Groq model pool.
+
+    Call early so the first user request never pays lazy model-load + probe
+    latency. Safe to call repeatedly.
+    """
+    from document_ingestion.ingestion.embedding import preload
+
+    preload()
+    get_model_pool()
+
+
+def prewarm_pipeline_async():
+    """Start prewarm on a daemon thread so app boot is never blocked on it."""
+    threading.Thread(
+        target=prewarm_pipeline,
+        daemon=True,
+        name="pipeline-prewarm",
+    ).start()
 
 
 def reformulate(question, history):
@@ -366,27 +433,15 @@ def build_context(docs):
     return "\n\n".join(parts)
 
 
-def _run_search(fn, *args):
-    try:
-        return fn(*args)
-    finally:
-        from django.db import connections
-        connections.close_all()
-
-
-def _parallel_search(query_vector, query):
-    """Run pgvector + FTS searches in parallel; each uses its own DB conn."""
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        vector_future = executor.submit(_run_search, vector_search, query_vector)
-        keyword_future = executor.submit(_run_search, keyword_search, query)
-        return vector_future.result(), keyword_future.result()
-
-
 def retrieve(question, history):
     """Reformulate (if history) then fetch top docs. Returns (query, docs)."""
     search_query = reformulate(question, history)
     query_vector = embed_texts([search_query])[0]
-    vector_hits, keyword_hits = _parallel_search(query_vector, search_query)
+    # Both searches are indexed and capped at K rows; run them on the request
+    # thread so we reuse its single DB connection instead of opening+closing a
+    # background thread connection each request (latency + Supabase pool load).
+    vector_hits = vector_search(query_vector)
+    keyword_hits = keyword_search(search_query)
     fused = rrf_fuse([vector_hits, keyword_hits])
     docs = rerank(fused, search_query)
     return search_query, docs
@@ -414,18 +469,18 @@ def stream_answer_text(question, context):
         SystemMessage(content="You are a helpful assistant."),
         HumanMessage(content=prompt),
     ]
+    text = ""
     try:
-        text = ""
-        emitted = False
         for delta in get_model_pool().stream(messages, max_tokens=MAX_TOKENS_ANSWER):
             text += delta
-            emitted = True
             yield delta
         if not text.strip():
             yield GEN_UNAVAILABLE
-        elif not emitted:
-            yield text
     except Exception:
+        # If we already streamed part of an answer, propagate so the caller can
+        # surface an error event the frontend can act on (no duplicate text).
+        if text.strip():
+            raise
         yield GEN_ERROR
 
 

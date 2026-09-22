@@ -125,6 +125,36 @@ def docadmin_status(request):
     return JsonResponse([to_dict(doc) for doc in queryset], safe=False)
 
 
+@staff_json_required
+def docadmin_content(request, document_id):
+    """Return a document's metadata plus its trained chunk texts (read-only)."""
+    try:
+        document = ReferenceDocument.objects.get(document_id=document_id)
+    except ReferenceDocument.DoesNotExist:
+        return JsonResponse({"error": "Document not found."}, status=404)
+
+    chunks = list(
+        document.chunks.values("chunk_index", "content").order_by("chunk_index")
+    )
+    return JsonResponse(
+        {
+            "document_id": str(document.document_id),
+            "title": document.title,
+            "file_name": document.file_name,
+            "file_type": document.file_type,
+            "status": document.status,
+            "error": document.error,
+            "chunk_count": len(chunks),
+            "created_at": document.created_at.isoformat(),
+            "updated_at": document.updated_at.isoformat(),
+            "chunks": [
+                {"index": chunk["chunk_index"], "content": chunk["content"]}
+                for chunk in chunks
+            ],
+        }
+    )
+
+
 @staff_member_required(login_url="/accounts/login/")
 @require_POST
 def docadmin_train(request, document_id):

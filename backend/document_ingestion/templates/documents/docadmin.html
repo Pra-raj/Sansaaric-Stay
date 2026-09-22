@@ -1,47 +1,234 @@
 {% extends "base.html" %}
-{% block title %}Admin Docs · RAG Chat{% endblock %}
+{% block title %}Train Bot · RAG Chat{% endblock %}
+{% block head %}
+<style>
+  main { max-width: 900px; }
+  .panel { border-radius: 8px; }
+  .tb-header { margin-bottom: 18px; }
+  .tb-header h1 { font-size: 22px; margin: 0 0 4px; color: #1a1a1a; }
+  .tb-header p { margin: 0; color: #888; font-size: 14px; }
+  .tb-label { font-size: 13px; font-weight: 700; color: #1a1a1a; margin: 0 0 8px; }
+
+  .drop-zone {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    min-height: 170px;
+    padding: 28px 16px;
+    border: 2px dashed #d1d5db;
+    border-radius: 8px;
+    background: #fafafa;
+    text-align: center;
+    cursor: pointer;
+    transition: border-color 0.15s, background 0.15s;
+  }
+  .drop-zone:hover { border-color: #9ca3af; background: #f5f5f5; }
+  .drop-zone.dragover { border-color: var(--accent, #2563eb); background: #eff6ff; }
+  .drop-zone .dz-bold { font-weight: 700; font-size: 15px; color: #1a1a1a; }
+  .drop-zone .dz-or { font-size: 13px; color: #888; margin: 2px 0; }
+  .drop-zone .dz-hint { font-size: 12px; color: #888; margin-top: 6px; }
+
+  .upload-bar { display: flex; align-items: flex-end; gap: 12px; margin-top: 14px; flex-wrap: wrap; }
+  .upload-bar .field { flex: 1; min-width: 200px; }
+  .upload-bar input[type=text] {
+    font: inherit;
+    width: 100%;
+    padding: 9px 11px;
+    border: 1px solid var(--line, #e5e5e5);
+    border-radius: 8px;
+    background: #fff;
+    color: #1a1a1a;
+    font-size: 14px;
+  }
+  .upload-bar input[type=text]:focus { outline: 2px solid var(--accent, #2563eb); outline-offset: -1px; }
+  .file-chips { margin-top: 10px; font-size: 13px; color: #888; line-height: 1.6; }
+  .file-chips strong { color: #1a1a1a; }
+  .dz-error { color: #dc2626; font-size: 13px; margin-top: 8px; }
+  button.primary { background: var(--accent, #2563eb); border-color: var(--accent, #2563eb); color: #fff; }
+  button.primary:hover { background: #1d4ed8; }
+  button:disabled { opacity: 0.5; cursor: default; }
+
+  .status-pill {
+    display: inline-block;
+    padding: 2px 10px;
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 600;
+    border: 1px solid transparent;
+    background: #fff;
+  }
+  .status-processing { color: #b45309; border-color: #fcd34d; background: #fffbeb; }
+  .status-uploaded { color: #15803d; border-color: #86efac; background: #f0fdf4; }
+  .status-failed { color: #b91c1c; border-color: #fca5a5; background: #fef2f2; }
+
+  .link-btn {
+    font: inherit;
+    font-size: 13px;
+    background: none;
+    border: none;
+    padding: 2px 4px;
+    color: var(--accent, #2563eb);
+    cursor: pointer;
+  }
+  .link-btn:hover { text-decoration: underline; background: none; }
+  .link-btn.danger { color: #dc2626; }
+  .error-tip { color: #dc2626; cursor: help; border-bottom: 1px dotted currentColor; }
+
+  /* Modal */
+  .modal-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.35);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 50;
+    padding: 20px;
+  }
+  .modal-overlay[hidden] { display: none; }
+  .modal {
+    background: #fff;
+    border: 1px solid #e5e5e5;
+    border-radius: 8px;
+    max-width: 480px;
+    width: 100%;
+    padding: 20px;
+    max-height: 80vh;
+    overflow-y: auto;
+  }
+  .modal h3 { margin: 0 0 12px; font-size: 16px; color: #1a1a1a; }
+  .modal dl { display: grid; grid-template-columns: 110px 1fr; gap: 6px 12px; font-size: 14px; margin: 0 0 16px; }
+  .modal dt { color: #888; font-weight: 600; }
+  .modal dd { margin: 0; color: #1a1a1a; word-break: break-word; }
+  .modal-actions { display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; }
+  .modal-actions form { display: inline; margin: 0; }
+
+  /* Trained directory / KB viewer */
+  .kb-grid { display: grid; grid-template-columns: 240px 1fr; gap: 14px; min-height: 320px; }
+  .kb-files { border: 1px solid var(--line, #e5e5e5); border-radius: 8px; overflow-y: auto; max-height: 480px; align-self: start; }
+  .kb-file {
+    display: block;
+    width: 100%;
+    text-align: left;
+    font: inherit;
+    font-size: 14px;
+    padding: 10px 14px;
+    border: none;
+    border-bottom: 1px solid var(--line, #e5e5e5);
+    background: #fff;
+    color: #1a1a1a;
+    cursor: pointer;
+  }
+  .kb-file:last-child { border-bottom: none; }
+  .kb-file:hover { background: #f7f7f8; }
+  .kb-file.active { background: #f0f4ff; }
+  .kb-file .kb-name { font-weight: 600; font-size: 13.5px; display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .kb-file .kb-meta { display: flex; align-items: center; gap: 6px; margin-top: 4px; font-size: 12px; color: #888; }
+  .kb-file .kb-chunks { margin-left: auto; }
+  .kb-preview {
+    border: 1px solid var(--line, #e5e5e5);
+    border-radius: 8px;
+    padding: 16px 18px;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    max-height: 520px;
+  }
+  .kb-preview-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
+  .kb-preview-head h3 { margin: 0; font-size: 15px; color: #1a1a1a; }
+  .kb-preview-head .muted { color: #888; font-size: 12px; }
+  .kb-content {
+    flex: 1;
+    overflow-y: auto;
+    border: 1px solid var(--line, #e5e5e5);
+    border-radius: 6px;
+    background: #fcfcfd;
+    padding: 12px 14px;
+    font-size: 13.5px;
+    line-height: 1.6;
+    color: #1a1a1a;
+    white-space: pre-wrap;
+    word-break: break-word;
+    min-height: 220px;
+  }
+  .kb-chunk-block { margin-bottom: 14px; }
+  .kb-chunk-block:last-child { margin-bottom: 0; }
+  .kb-chunk-num {
+    display: inline-block;
+    font-size: 10.5px;
+    font-weight: 700;
+    letter-spacing: 0.4px;
+    text-transform: uppercase;
+    color: #888;
+    background: #f1f5f9;
+    border: 1px solid var(--line, #e5e5e5);
+    border-radius: 999px;
+    padding: 1px 9px;
+    margin-bottom: 6px;
+  }
+  .kb-actions { display: flex; gap: 8px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line, #e5e5e5); }
+  .kb-actions form { display: inline; margin: 0; }
+
+  @media (max-width: 720px) {
+    .kb-grid { grid-template-columns: 1fr; }
+  }
+</style>
+{% endblock %}
 {% block content %}
 
+<div class="tb-header">
+  <h1>Train Chat Bot</h1>
+  <p>Upload a training file</p>
+</div>
+
+<!-- 1. Upload -->
 <div class="panel">
-  <h1>Upload &amp; train documents</h1>
-  <p class="desc">Files are stored in Supabase Storage and trained (chunked + embedded) by the background worker. Supported: PDF, DOCX, XLSX, XLS, CSV, TXT, MD.</p>
+  <p class="tb-label">Upload a training file</p>
   <form method="post" enctype="multipart/form-data" action="{% url 'docadmin' %}" id="upload-form">
     {% csrf_token %}
-    <div class="form-grid">
-      <div>
-        <label for="id_title">Title (optional)</label>
+    <label class="drop-zone" id="drop-zone" for="id_files">
+      <span class="dz-bold">Click to Browse</span>
+      <span class="dz-or">Or</span>
+      <span class="dz-bold">Drag &amp; Drop PDF, DOCX, TXT, MD, CSV, XLSX, XLS</span>
+      <span class="dz-hint">Accepted: .pdf .docx .txt .md .csv .xlsx .xls — multiple files allowed</span>
+      <input type="file" name="files" id="id_files" multiple accept=".pdf,.docx,.txt,.md,.csv,.xlsx,.xls">
+    </label>
+    <div class="file-chips" id="file-chips"></div>
+    <div class="dz-error" id="dz-error" hidden></div>
+    <div class="upload-bar">
+      <div class="field">
+        <label for="id_title" style="display:block; font-size:13px; font-weight:600; margin:0 0 6px;">Title (optional)</label>
         <input type="text" name="title" id="id_title" placeholder="Applied to all files; falls back to file name">
       </div>
-      <div>
-        <label for="id_files">Files</label>
-        <input type="file" name="files" id="id_files" multiple required>
-      </div>
+      <button type="submit" class="primary" id="upload-btn" disabled>Upload &amp; Train</button>
     </div>
     {% if form.errors %}
-      <div class="errors">
+      <div class="errors" style="color:#dc2626; font-size:13px; margin-top:10px;">
         <ul>
           {% for field, errors in form.errors.items %}{% for error in errors %}<li>{% if field != "__all__" %}{{ field|title }}: {% endif %}{{ error }}</li>{% endfor %}{% endfor %}
         </ul>
       </div>
     {% endif %}
-    <div style="margin-top:16px;"><button type="submit" class="primary">Upload &amp; train</button></div>
   </form>
 </div>
 
+<!-- 2. Uploaded files table -->
 <div class="panel">
   <div style="display:flex; align-items:baseline; justify-content:space-between;">
-    <h2>Documents</h2>
-    <span class="muted" id="poll-note" style="font-size:12px;">auto-refreshes</span>
+    <h2 style="font-size:16px; margin:0 0 14px;">Uploaded Files</h2>
+    <span class="muted" style="font-size:12px;">auto-refreshes</span>
   </div>
   <table>
     <thead>
       <tr>
-        <th>Title</th>
         <th>File</th>
+        <th>Type</th>
+        <th>Size</th>
+        <th>Upload date</th>
         <th>Status</th>
-        <th>Chunks</th>
-        <th>Uploaded</th>
-        <th></th>
+        <th>Actions</th>
       </tr>
     </thead>
     <tbody id="doc-table">
@@ -50,7 +237,43 @@
   </table>
 </div>
 
+<!-- 3. Trained directory / knowledge base viewer -->
+<div class="panel">
+  <h2 style="font-size:16px; margin:0 0 4px;">Trained Directory</h2>
+  <p class="muted" style="font-size:13px; margin:0 0 14px;">Knowledge base files the bot answers from — previews are reconstructed from trained chunks.</p>
+  <div class="kb-grid">
+    <div class="kb-files" id="kb-files">
+      <div class="empty">Loading…</div>
+    </div>
+    <div class="kb-preview">
+      <div class="kb-preview-head">
+        <h3 id="kb-title">—</h3>
+        <span class="muted" id="kb-meta"></span>
+      </div>
+      <div class="kb-content" id="kb-content">
+        <div class="empty">Select a file to preview its trained content.</div>
+      </div>
+      <div class="kb-actions">
+        <button type="button" class="link-btn" id="kb-details-btn" disabled>Details</button>
+        <form method="post" id="kb-retrain-form" style="display:none;">
+          <input type="hidden" name="csrfmiddlewaretoken" value="{{ csrf_token }}">
+          <button type="submit" class="link-btn">Re-train</button>
+        </form>
+      </div>
+    </div>
+  </div>
+</div>
+
 <input type="hidden" name="csrfmiddlewaretoken" value="{{ csrf_token }}">
+
+<!-- Details modal -->
+<div class="modal-overlay" id="view-modal" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="view-modal-title">
+    <h3 id="view-modal-title">Document details</h3>
+    <dl id="view-modal-body"></dl>
+    <div class="modal-actions" id="view-modal-actions"></div>
+  </div>
+</div>
 
 <script>
 (function () {
@@ -77,48 +300,279 @@
     return date.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
   }
 
-  function chip(status) {
-    return '<span class="chip chip-' + esc(status) + '">' + esc(status) + '</span>';
+  function statusInfo(doc) {
+    if (doc.status === 'failed') {
+      const tip = doc.error
+        ? '<span class="error-tip" title="' + esc(doc.error).replace(/"/g, '&quot;') + '">Failed</span>'
+        : 'Failed';
+      return { cls: 'status-failed', label: tip, raw: true };
+    }
+    if (doc.status === 'ready') return { cls: 'status-uploaded', label: 'Uploaded' };
+    return { cls: 'status-processing', label: 'Processing' };
   }
 
-  function row(doc) {
-    const errorTip = doc.error
-      ? '<span class="error-tip" title="' + esc(doc.error).replace(/"/g, '&quot;') + '">failed</span>'
-      : chip('ready');
-    const statusCell = doc.status === 'failed' ? errorTip : chip(doc.status);
+  function pill(info) {
+    return '<span class="status-pill ' + info.cls + '">' + (info.raw ? info.label : esc(info.label)) + '</span>';
+  }
 
-    const train = '<form method="post" action="' + esc('/docadmin/train/' + doc.document_id + '/') + '" style="display:inline; margin:0;">'
+  /* ---------- Details modal ---------- */
+  const modal = document.getElementById('view-modal');
+  const modalBody = document.getElementById('view-modal-body');
+  const modalActions = document.getElementById('view-modal-actions');
+
+  function openModal(doc) {
+    const info = statusInfo(doc);
+    modalBody.innerHTML =
+      '<dt>Title</dt><dd>' + esc(doc.title) + '</dd>' +
+      '<dt>File</dt><dd>' + esc(doc.file_name) + '</dd>' +
+      '<dt>Type</dt><dd>' + esc(doc.file_type) + '</dd>' +
+      '<dt>Size</dt><dd>' + fmtSize(doc.file_size) + '</dd>' +
+      '<dt>Uploaded</dt><dd>' + fmtDate(doc.created_at) + '</dd>' +
+      '<dt>Status</dt><dd>' + pill(info) + '</dd>' +
+      '<dt>Chunks</dt><dd>' + (doc.chunk_count != null ? esc(doc.chunk_count) : '—') + '</dd>' +
+      (doc.error ? '<dt>Error</dt><dd style="color:#dc2626;">' + esc(doc.error) + '</dd>' : '');
+    const train = '<form method="post" action="' + esc('/docadmin/train/' + doc.document_id + '/') + '">'
       + '<input type="hidden" name="csrfmiddlewaretoken" value="' + token + '">'
-      + '<button type="submit" ' + (doc.status === 'processing' ? 'disabled' : '') + '>Re-train</button></form>';
-    const del = '<form method="post" action="' + esc('/docadmin/delete/' + doc.document_id + '/') + '" style="display:inline; margin:0;" onsubmit="return confirm(\'Delete "' + esc(doc.title) + '" and its chunks permanently?\');">'
+      + '<button type="submit" class="primary" ' + (doc.status === 'processing' ? 'disabled' : '') + '>Re-train</button></form>';
+    const del = '<form method="post" action="' + esc('/docadmin/delete/' + doc.document_id + '/') + '" onsubmit="return confirm(\'Delete this document and its chunks permanently?\');">'
       + '<input type="hidden" name="csrfmiddlewaretoken" value="' + token + '">'
       + '<button type="submit" class="danger">Delete</button></form>';
+    modalActions.innerHTML = '<button type="button" id="modal-close">Close</button>' + train + del;
+    document.getElementById('modal-close').addEventListener('click', closeModal);
+    modal.hidden = false;
+  }
 
-    return '<tr>'
-      + '<td><strong>' + esc(doc.title) + '</strong></td>'
-      + '<td><span>' + esc(doc.file_name) + '</span><div class="muted" style="font-size:12px;">' + esc(doc.file_type) + ' · ' + fmtSize(doc.file_size) + '</div></td>'
-      + '<td>' + statusCell + '</td>'
-      + '<td>' + (doc.chunk_count != null ? doc.chunk_count : '—') + '</td>'
+  function closeModal() { modal.hidden = true; }
+  modal.addEventListener('click', function (e) { if (e.target === modal) closeModal(); });
+  document.addEventListener('keydown', function (e) { if (e.key === 'Escape') closeModal(); });
+
+  /* ---------- Document table ---------- */
+  function row(doc) {
+    const info = statusInfo(doc);
+    const view = '<button type="button" class="link-btn" data-view="' + esc(doc.document_id) + '">View</button>';
+    const del = '<form method="post" action="' + esc('/docadmin/delete/' + doc.document_id + '/') + '" style="display:inline; margin:0;" onsubmit="return confirm(\'Delete this document and its chunks permanently?\');">'
+      + '<input type="hidden" name="csrfmiddlewaretoken" value="' + token + '">'
+      + '<button type="submit" class="link-btn danger" style="background:none; border:none;">Delete</button></form>';
+
+    return '<tr data-doc=\'' + esc(JSON.stringify(doc)) + '\'>'
+      + '<td><strong>' + esc(doc.title) + '</strong><div class="muted" style="font-size:12px;">' + esc(doc.file_name) + '</div></td>'
+      + '<td>' + esc(doc.file_type) + '</td>'
+      + '<td>' + fmtSize(doc.file_size) + '</td>'
       + '<td>' + fmtDate(doc.created_at) + '</td>'
-      + '<td><div class="row-actions">' + train + del + '</div></td>'
+      + '<td>' + pill(info) + '</td>'
+      + '<td><div class="row-actions">' + view + del + '</div></td>'
       + '</tr>';
   }
 
-  async function refresh() {
+  tbody.addEventListener('click', function (e) {
+    const btn = e.target.closest('[data-view]');
+    if (!btn) return;
+    const tr = btn.closest('tr');
+    try { openModal(JSON.parse(tr.dataset.doc)); } catch (err) { /* ignore */ }
+  });
+
+  async function refreshTable() {
     try {
       const response = await fetch('/docadmin/status/', { headers: { 'Accept': 'application/json' } });
       if (!response.ok) throw new Error('status ' + response.status);
       const docs = await response.json();
       tbody.innerHTML = docs.length
         ? docs.map(row).join('')
-        : '<tr><td colspan="6" class="empty">No documents yet — upload something above.</td></tr>';
+        : '<tr><td colspan="6" class="empty">No files uploaded yet — drop a file above.</td></tr>';
     } catch (err) {
       tbody.innerHTML = '<tr><td colspan="6" class="empty">Could not reach the status endpoint: ' + esc(err.message) + '</td></tr>';
     }
   }
 
-  refresh();
-  setInterval(refresh, 2500);
+  refreshTable();
+  setInterval(refreshTable, 2500);
+
+  /* ---------- Drop zone ---------- */
+  const zone = document.getElementById('drop-zone');
+  const input = document.getElementById('id_files');
+  const chips = document.getElementById('file-chips');
+  const dzError = document.getElementById('dz-error');
+  const uploadBtn = document.getElementById('upload-btn');
+  const ALLOWED = ['.pdf', '.docx', '.txt', '.md', '.csv', '.xlsx', '.xls'];
+
+  function allowedFiles(fileList) {
+    const ok = [];
+    const bad = [];
+    Array.from(fileList).forEach(function (f) {
+      const lower = f.name.toLowerCase();
+      if (ALLOWED.some(function (ext) { return lower.endsWith(ext); })) ok.push(f);
+      else bad.push(f.name);
+    });
+    return { ok: ok, bad: bad };
+  }
+
+  function setInputFiles(files) {
+    const dt = new DataTransfer();
+    files.forEach(function (f) { dt.items.add(f); });
+    input.files = dt.files;
+    updateChips();
+  }
+
+  function updateChips() {
+    const files = Array.from(input.files || []);
+    uploadBtn.disabled = files.length === 0;
+    if (!files.length) { chips.innerHTML = ''; return; }
+    chips.innerHTML = '<strong>' + files.length + ' file' + (files.length > 1 ? 's' : '') + ' selected:</strong> '
+      + files.map(function (f) { return esc(f.name) + ' (' + fmtSize(f.size) + ')'; }).join(', ');
+  }
+
+  function showError(msg) {
+    dzError.textContent = msg;
+    dzError.hidden = !msg;
+  }
+
+  ['dragenter', 'dragover'].forEach(function (evt) {
+    zone.addEventListener(evt, function (e) {
+      e.preventDefault();
+      e.stopPropagation();
+      zone.classList.add('dragover');
+    });
+  });
+  ['dragleave', 'drop'].forEach(function (evt) {
+    zone.addEventListener(evt, function (e) {
+      e.preventDefault();
+      e.stopPropagation();
+      zone.classList.remove('dragover');
+    });
+  });
+  zone.addEventListener('drop', function (e) {
+    const dropped = e.dataTransfer && e.dataTransfer.files;
+    if (!dropped || !dropped.length) return;
+    const result = allowedFiles(dropped);
+    if (result.bad.length) {
+      showError('Unsupported file type — skipped: ' + result.bad.join(', ') + '. Accepted: PDF, DOCX, TXT, MD, CSV, XLSX, XLS.');
+    } else {
+      showError('');
+    }
+    if (result.ok.length) setInputFiles(result.ok);
+  });
+  input.addEventListener('change', function () {
+    const result = allowedFiles(input.files || []);
+    if (result.bad.length) {
+      showError('Unsupported file type — removed: ' + result.bad.join(', '));
+      setInputFiles(result.ok);
+    } else {
+      showError('');
+      updateChips();
+    }
+  });
+  document.getElementById('upload-form').addEventListener('submit', function () {
+    uploadBtn.disabled = true;
+    uploadBtn.textContent = 'Uploading…';
+  });
+
+  /* ---------- Trained Directory (real knowledge base) ---------- */
+  const kbFiles = document.getElementById('kb-files');
+  const kbTitle = document.getElementById('kb-title');
+  const kbMeta = document.getElementById('kb-meta');
+  const kbContent = document.getElementById('kb-content');
+  const kbDetailsBtn = document.getElementById('kb-details-btn');
+  const kbRetrainForm = document.getElementById('kb-retrain-form');
+  let kbDocs = [];
+  let kbActive = null;
+
+  function renderKbList(docs) {
+    if (!docs.length) {
+      kbFiles.innerHTML = '<div class="empty">No documents uploaded yet — train the bot with files above.</div>';
+      return;
+    }
+    kbFiles.innerHTML = docs.map(function (doc) {
+      const status = doc.status === 'failed'
+        ? 'failed'
+        : (doc.status === 'ready' ? 'ready' : 'processing');
+      return '<button type="button" class="kb-file' + (kbActive === doc.document_id ? ' active' : '') + '" data-doc-id="' + esc(doc.document_id) + '">'
+        + '<span class="kb-name">' + esc(doc.file_name) + '</span>'
+        + '<span class="kb-meta"><span class="status-pill status-' + status + '">' + esc(doc.status) + '</span>'
+        + '<span class="kb-chunks">' + (doc.chunk_count != null ? esc(doc.chunk_count) + ' chunks' : '—') + '</span></span>'
+        + '</button>';
+    }).join('');
+  }
+
+  function renderKbPreview(data) {
+    kbTitle.textContent = data.file_name;
+    const created = data.created_at ? fmtDate(data.created_at) : '—';
+    kbMeta.textContent = data.status + ' · ' + data.chunk_count + ' chunks · uploaded ' + created;
+    kbRetrainForm.style.display = 'inline';
+    kbRetrainForm.action = '/docadmin/train/' + data.document_id + '/';
+    kbDetailsBtn.disabled = false;
+
+    if (data.status === 'processing') {
+      kbContent.innerHTML = '<div class="empty">Still processing — the bot is chunking this file.</div>';
+      return;
+    }
+    if (data.status === 'failed') {
+      kbContent.innerHTML = '<div class="empty">Training failed' + (data.error ? ' (' + esc(data.error) + ')' : '') + '.</div>';
+      return;
+    }
+    if (!data.chunks.length) {
+      kbContent.innerHTML = '<div class="empty">No trained content yet — re-train this document.</div>';
+      return;
+    }
+    kbContent.innerHTML = data.chunks.map(function (chunk) {
+      return '<div class="kb-chunk-block"><span class="kb-chunk-num">Chunk ' + (chunk.index + 1) + '</span>'
+        + esc(chunk.content) + '</div>';
+    }).join('');
+  }
+
+  kbFiles.addEventListener('click', function (e) {
+    const btn = e.target.closest('[data-doc-id]');
+    if (!btn) return;
+    const docId = btn.dataset.docId;
+    kbActive = docId;
+    kbFiles.querySelectorAll('.kb-file').forEach(function (el) {
+      el.classList.toggle('active', el === btn);
+    });
+    kbTitle.textContent = 'Loading…';
+    kbMeta.textContent = '';
+    kbContent.innerHTML = '<div class="empty">Loading…</div>';
+    kbDetailsBtn.disabled = true;
+
+    fetch('/docadmin/content/' + docId + '/', { headers: { 'Accept': 'application/json' } })
+      .then(function (response) {
+        if (!response.ok) throw new Error('status ' + response.status);
+        return response.json();
+      })
+      .then(function (data) {
+        renderKbPreview(data);
+      })
+      .catch(function (err) {
+        kbContent.innerHTML = '<div class="empty">Could not load content: ' + esc(err.message) + '</div>';
+      });
+  });
+
+  kbDetailsBtn.addEventListener('click', function () {
+    const doc = kbDocs.find(function (d) { return d.document_id === kbActive; });
+    if (doc) openModal(doc);
+  });
+
+  async function refreshKb() {
+    try {
+      const response = await fetch('/docadmin/status/', { headers: { 'Accept': 'application/json' } });
+      if (!response.ok) throw new Error('status ' + response.status);
+      kbDocs = await response.json();
+      renderKbList(kbDocs);
+      if (kbActive) {
+        const still = kbDocs.find(function (d) { return d.document_id === kbActive; });
+        if (!still) { kbActive = null; kbContent.innerHTML = '<div class="empty">Select a file to preview its trained content.</div>'; }
+        else if (still.status !== 'processing') {
+          fetch('/docadmin/content/' + kbActive + '/', { headers: { 'Accept': 'application/json' } })
+            .then(function (r) { return r.json(); })
+            .then(renderKbPreview)
+            .catch(function () { /* ignore re-render */ });
+        }
+      }
+    } catch (err) {
+      kbFiles.innerHTML = '<div class="empty">Could not reach the status endpoint.</div>';
+    }
+  }
+
+  refreshKb();
+  setInterval(refreshKb, 2500);
 })();
 </script>
 {% endblock %}

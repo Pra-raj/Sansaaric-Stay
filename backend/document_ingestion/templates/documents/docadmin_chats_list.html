@@ -1,0 +1,25 @@
+{% for conversation in conversations %}
+  <button class="conv-item"
+          data-pk="{{ conversation.pk }}"
+          data-url="{% url 'docadmin_chat_thread' conversation.pk %}"
+          data-contact="{{ conversation.contact_json|escapejs }}"
+          {% if forloop.first and initial %}data-initial="1"{% endif %}>
+    <span class="avatar" aria-hidden="true"></span>
+    <span class="conv-text">
+      <span class="conv-name">
+        {% if conversation.user %}
+          {% if conversation.user.get_full_name %}{{ conversation.user.get_full_name }}{% else %}{{ conversation.user.username }}{% endif %}
+        {% else %}
+          {% if conversation.title and conversation.title != "New chat" %}{{ conversation.title }}{% else %}Anonymous{% endif %}
+        {% endif %}
+      </span>
+      <span class="conv-bottom">
+        <span class="conv-snippet">{{ conversation.last_message|default:conversation.title|default:"No messages yet" }}</span>
+        <span class="conv-time">{{ conversation.updated_at|date:"M j, H:i" }}</span>
+      </span>
+    </span>
+    <span class="badge {% if conversation.is_human %}badge-human{% else %}badge-ai{% endif %}">{% if conversation.is_human %}Human{% else %}AI{% endif %}</span>
+  </button>
+{% empty %}
+  <div class="empty">No conversations match your filter — or start one with “New conversation”.</div>
+{% endfor %}

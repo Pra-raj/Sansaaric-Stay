@@ -16,6 +16,7 @@ from langchain_core.documents import Document
 from .models import Conversation, Message
 from .services import (
     NO_INFO_PREFIX,
+    NO_INFO_MESSAGE,
     NO_DOCUMENTS_MESSAGE,
     _answer_cache,
     _cache_lock,
@@ -24,6 +25,8 @@ from .services import (
     citation_list,
     extract_text,
     is_no_answer,
+    normalize_answer,
+    rerank,
     rrf_fuse,
 )
 from . import services, views
@@ -55,6 +58,47 @@ class ServicesUnitTests(SimpleTestCase):
         self.assertTrue(is_no_answer(services.GEN_ERROR))
         self.assertTrue(is_no_answer(services.GEN_UNAVAILABLE))
         self.assertFalse(is_no_answer("Checkout is at 11:00 AM."))
+
+    def test_normalize_answer_exact_copy(self):
+        self.assertEqual(
+            normalize_answer(""),
+            NO_INFO_MESSAGE,
+        )
+        self.assertEqual(
+            normalize_answer("  " + NO_INFO_PREFIX),
+            NO_INFO_MESSAGE,
+        )
+        self.assertEqual(
+            normalize_answer("Checkout is at 11:00 AM."),
+            "Checkout is at 11:00 AM.",
+        )
+
+    def test_rerank_keeps_full_context_when_scores_low(self):
+        def fake_chunk(pk):
+            return type(
+                "FakeChunk",
+                (),
+                {"pk": pk, "content": f"chunk {pk}", "metadata": {"source": f"{pk}.txt"}},
+            )()
+
+        # 8 chunks, none exceeding the relevance floor -> must not shrink to one.
+        chunks = [fake_chunk(pk) for pk in range(1, 9)]
+
+        class LowReranker:
+            def rerank(self, docs, question, top_n=len(chunks)):
+                return [
+                    {"index": i, "relevance_score": 0.05}
+                    for i in range(len(docs))
+                ]
+
+        with patch("chat.services.get_reranker", return_value=LowReranker()):
+            kept = rerank(chunks, "any question")
+
+        self.assertGreaterEqual(len(kept), 5)
+        self.assertEqual(
+            [d.metadata["chunk_pk"] for d in kept],
+            list(range(1, 6)),
+        )
 
     def test_extract_text_string_and_blocks(self):
         self.assertEqual(extract_text("hello"), "hello")
@@ -314,3 +358,149 @@ class TurnHistoryTests(TestCase):
         self.assertEqual(
             [t["question"] for t in history], ["first", "third"]
         )
+
+
+class StaffInboxTests(TestCase):
+    """Staff inbox endpoints: reply, update, create, filtered list."""
+
+    def setUp(self):
+        from django.contrib.auth.models import User
+
+        self.staff = User.objects.create_user(
+            username="staff", password="x", is_staff=True
+        )
+        self.customer = User.objects.create_user(
+            username="customer", password="x", email="customer@example.com"
+        )
+        self.conversation = Conversation.objects.create(
+            user=self.customer,
+            title="Booking enquiry",
+            channel="Website",
+            email="customer@example.com",
+            phone="9812345678",
+            note="wants a mountain view",
+        )
+        Message.objects.create(
+            conversation=self.conversation, role="user", content="Hi"
+        )
+        self.client.force_login(self.staff)
+
+    def test_reply_persists_human_message(self):
+        response = self.client.post(
+            reverse("docadmin_chat_reply", args=[self.conversation.pk]),
+            data=json.dumps({"content": "Hi, I will check that for you."}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["ok"])
+
+        message = Message.objects.get(
+            conversation=self.conversation, content="Hi, I will check that for you."
+        )
+        self.assertEqual(message.role, "assistant")
+        self.assertTrue(message.is_human)
+        self.assertEqual(
+            Message.objects.filter(
+                conversation=self.conversation, role="assistant", is_human=True
+            ).count(),
+            1,
+        )
+
+    def test_reply_requires_staff(self):
+        self.client.force_login(self.customer)
+        response = self.client.post(
+            reverse("docadmin_chat_reply", args=[self.conversation.pk]),
+            data=json.dumps({"content": "hi"}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 302)  # redirected to login
+
+    def test_reply_validates_empty_content(self):
+        response = self.client.post(
+            reverse("docadmin_chat_reply", args=[self.conversation.pk]),
+            data=json.dumps({"content": "   "}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(Message.objects.filter(is_human=True).count(), 0)
+
+    def test_update_partial_fields_and_toggle(self):
+        response = self.client.post(
+            reverse("docadmin_chat_update", args=[self.conversation.pk]),
+            data=json.dumps(
+                {"channel": "WhatsApp", "note": "subject updated", "is_human": True}
+            ),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["contact"]["channel"], "WhatsApp")
+        self.assertEqual(data["contact"]["note"], "subject updated")
+        self.assertTrue(data["contact"]["is_human"])
+
+        self.conversation.refresh_from_db()
+        self.assertEqual(self.conversation.channel, "WhatsApp")
+        self.assertTrue(self.conversation.is_human)
+
+    def test_update_invalid_channel_rejected(self):
+        response = self.client.post(
+            reverse("docadmin_chat_update", args=[self.conversation.pk]),
+            data=json.dumps({"channel": "Telegram"}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 400)
+
+    def test_create_conversation_with_channel_and_contact(self):
+        response = self.client.post(
+            reverse("docadmin_chat_create"),
+            data=json.dumps(
+                {
+                    "name": "Riya Kapoor",
+                    "channel": "Instagram",
+                    "email": "riya@example.com",
+                    "phone": "9822334455",
+                }
+            ),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertTrue(data["ok"])
+
+        created = Conversation.objects.get(pk=data["conversation_id"])
+        self.assertEqual(created.title, "Riya Kapoor")
+        self.assertEqual(created.channel, "Instagram")
+        self.assertEqual(created.email, "riya@example.com")
+        self.assertEqual(created.phone, "9822334455")
+        self.assertFalse(created.is_human)
+
+    def test_list_filters_by_channel(self):
+        other = Conversation.objects.create(
+            session_key="anon", title="Other", channel="Facebook"
+        )
+        response = self.client.get(
+            reverse("docadmin_chats"), {"channel": "Facebook"}
+        )
+        self.assertEqual(response.status_code, 200)
+        pks = [c.pk for c in response.context["conversations"]]
+        self.assertIn(other.pk, pks)
+        self.assertNotIn(self.conversation.pk, pks)
+
+    def test_list_searches_by_phone(self):
+        response = self.client.get(reverse("docadmin_chats"), {"q": "981234"})
+        self.assertEqual(response.status_code, 200)
+        pks = [c.pk for c in response.context["conversations"]]
+        self.assertIn(self.conversation.pk, pks)
+
+    def test_list_searches_by_customer_email(self):
+        response = self.client.get(reverse("docadmin_chats"), {"q": "customer@exa"})
+        self.assertEqual(response.status_code, 200)
+        pks = [c.pk for c in response.context["conversations"]]
+        self.assertIn(self.conversation.pk, pks)
+
+    def test_list_partial_returns_list_template(self):
+        response = self.client.get(reverse("docadmin_chats"), {"partial": "1"})
+        self.assertEqual(response.status_code, 200)
+        render_templates = [t.name for t in response.templates]
+        self.assertIn("documents/docadmin_chats_list.html", render_templates)

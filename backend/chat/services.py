@@ -55,15 +55,42 @@ Follow-up question: {question}
 
 Standalone question:"""
 
-ANSWER_PROMPT = """You are a helpful assistant answering questions.
-Use ONLY the context provided below. If the context does not contain enough
-information, say exactly: "I don't have enough information to answer that question
-based on the provided documents."
+SANSAARIC_SYSTEM_MESSAGE = """You are the reservations assistant for Sansaaric Stay, a
+Nepali travel and booking agency that connects travellers with hand-picked hotels,
+homestays, and resorts across Nepal.
 
-Answer directly in plain text: no markdown or formatting symbols (no asterisks,
-no bullets, no numbered lists, no headings, no hashtags). Never begin your answer
-with phrases like "Based on the provided documents", "According to the documents",
-or "The document states". Just answer the question.
+You help guests with properties and stays, rates and meal plans, booking, deposits,
+cancellations and refunds, destinations in Nepal, and the agency's policies and contact
+details. Always respond in English, in a warm, concise, professional travel-concierge tone.
+
+When a suggestion or a current offer genuinely helps and is supported by the provided
+context, mention it. Never invent properties, rates, discounts, availability, or policies.
+
+If the question is outside the agency's services (flights, visas, non-Nepal travel, etc.),
+reply with exactly one short sentence: "I can only help with hotels, homestays, and resorts
+in Nepal that are bookable through Sansaaric Stay." Then stop."""
+
+ANSWER_PROMPT = """Answer the question using ONLY the context provided below.
+
+Answer as completely as the context allows, even when it is partial. If the
+context supports part of the answer, give that part and clearly note what the
+context does not confirm. Only use the no-info reply when the context contains
+nothing relevant to the question, and then use it verbatim: "I'm sorry, I'm
+unable to answer that question right now. Please contact our team at +977 1 456
+7890 or email reservations@sansaaric.com."
+
+When the user asks for "a table", "a list", a comparison, or a summary, present
+it as a short dash list or a side-by-side plain-text comparison. Never refuse
+an answer just because of the requested format.
+
+Formatting rules:
+- Answer in short paragraphs with natural line breaks between them.
+- Use a simple dash list ("- item") when comparing three or more items, such as
+  rates, inclusions, or options.
+- No markdown: no bold, no asterisks, no headings, no tables, no hashtags.
+  Write prices inline, e.g. "120 USD per night".
+- Never begin your answer with phrases like "Based on the provided documents",
+  "According to the documents", or "The document states".
 
 Question: {question}
 
@@ -82,9 +109,10 @@ NO_DOCUMENTS_MESSAGE = (
     "in the admin dashboard first."
 )
 
-NO_INFO_PREFIX = (
-    "I don't have enough information to answer that question based on the "
-    "provided documents."
+NO_INFO_PREFIX = "I'm sorry, I'm unable to answer that question right now."
+NO_INFO_MESSAGE = (
+    "I'm sorry, I'm unable to answer that question right now. Please contact "
+    "our team at +977 1 456 7890 or email reservations@sansaaric.com."
 )
 GEN_ERROR = "Sorry, I encountered an error while generating the answer."
 GEN_UNAVAILABLE = "I couldn't generate an answer right now. Please try again."
@@ -97,6 +125,18 @@ def is_no_answer(answer):
     if answer in (GEN_ERROR, GEN_UNAVAILABLE):
         return True
     return NO_INFO_PREFIX in answer or answer.startswith(NO_INFO_PREFIX[:40])
+
+
+def normalize_answer(answer):
+    """Replace any no-answer output with the canonical canned message.
+
+    The model is told the exact wording, but it sometimes paraphrases (e.g.
+    writing the phone number wrongly). Pinning it here keeps the fallback
+    copy consistent and verifiable.
+    """
+    if is_no_answer(answer):
+        return NO_INFO_MESSAGE
+    return answer
 
 
 def extract_text(content):
@@ -343,7 +383,7 @@ def reformulate(question, history):
         pool = get_model_pool()
         response = pool.invoke(
             [
-                SystemMessage(content="You rephrase follow-up questions into standalone search queries."),
+                SystemMessage(content="You rephrase follow-up questions into standalone search queries about Nepal stays, properties, destinations, and bookings."),
                 HumanMessage(content=REFORMULATION_PROMPT.format(history=history_text, question=question)),
             ],
             max_tokens=MAX_TOKENS_REFORMULATE,
@@ -415,12 +455,20 @@ def rerank(chunks, question, top_n=TOP_N):
             results, key=lambda r: r["relevance_score"], reverse=True
         )
         kept = []
+        seen = set()
         for result in ranked:
             doc = docs[result["index"]]
             if result["relevance_score"] >= RERANK_MIN_SCORE:
                 kept.append(doc)
-        if not kept and ranked:
-            kept = [docs[ranked[0]["index"]]]
+                seen.add(doc.metadata["chunk_pk"])
+        # Top up so the LLM always gets full context even when the reranker is
+        # unconfident; too-thin context makes the model fall back to "no info".
+        for doc in docs:
+            if len(kept) >= top_n:
+                break
+            if doc.metadata["chunk_pk"] not in seen:
+                kept.append(doc)
+                seen.add(doc.metadata["chunk_pk"])
         return kept[:top_n]
     except Exception:
         return docs[:top_n]
@@ -452,12 +500,12 @@ def generate_answer(question, context):
     try:
         answer = get_model_pool().invoke_text(
             [
-                SystemMessage(content="You are a helpful assistant."),
+                SystemMessage(content=SANSAARIC_SYSTEM_MESSAGE),
                 HumanMessage(content=prompt),
             ],
             max_tokens=MAX_TOKENS_ANSWER,
         )
-        return answer or GEN_UNAVAILABLE
+        return normalize_answer(answer or GEN_UNAVAILABLE)
     except Exception:
         return GEN_ERROR
 
@@ -466,7 +514,7 @@ def stream_answer_text(question, context):
     """Yield answer token deltas; accumulates to the full answer."""
     prompt = ANSWER_PROMPT.format(question=question, context=context)
     messages = [
-        SystemMessage(content="You are a helpful assistant."),
+        SystemMessage(content=SANSAARIC_SYSTEM_MESSAGE),
         HumanMessage(content=prompt),
     ]
     text = ""

@@ -3,7 +3,7 @@ import logging
 from datetime import timedelta
 
 from django.contrib.admin.views.decorators import staff_member_required
-from django.db.models import Count
+from django.db.models import Count, OuterRef, Q, Subquery
 from django.http import JsonResponse, StreamingHttpResponse
 from django.shortcuts import get_object_or_404, render
 from django.utils import timezone
@@ -18,6 +18,7 @@ from .services import (
     cached_answer,
     citation_list,
     is_no_answer,
+    normalize_answer,
     retrieve,
     stream_answer_text,
 )
@@ -189,16 +190,75 @@ def _open_conversation(request, payload):
 
 @staff_member_required(login_url="/accounts/login/")
 def docadmin_chats(request):
+    query = (request.GET.get("q") or "").strip()
+    channel = (request.GET.get("channel") or "").strip()
+
+    last_message = (
+        Message.objects.filter(conversation_id=OuterRef("pk"))
+        .order_by("-created_at")
+        .values("content")[:1]
+    )
     conversations = (
         Conversation.objects.select_related("user")
-        .annotate(message_count=Count("messages"))
-        .order_by("-updated_at")[:50]
+        .annotate(
+            message_count=Count("messages"),
+            last_message=Subquery(last_message),
+        )
+        .order_by("-updated_at")
     )
+    if channel:
+        conversations = conversations.filter(channel=channel)
+    if query:
+        conversations = conversations.filter(
+            Q(user__email__icontains=query)
+            | Q(user__first_name__icontains=query)
+            | Q(user__last_name__icontains=query)
+            | Q(user__username__icontains=query)
+            | Q(email__icontains=query)
+            | Q(phone__icontains=query)
+            | Q(title__icontains=query)
+        )
+    conversations = list(conversations[:100])
+    for conversation in conversations:
+        conversation.contact_data = _contact_payload(conversation)
+        conversation.contact_json = json.dumps(conversation.contact_data)
+
+    template = "documents/docadmin_chats_list.html"
+    if not request.GET.get("partial"):
+        template = "documents/docadmin_chats.html"
     return render(
         request,
-        "documents/docadmin_chats.html",
-        {"conversations": conversations},
+        template,
+        {
+            "conversations": conversations,
+            "active_channel": channel,
+            "query": query,
+        },
     )
+
+
+def _conversation_name(conversation):
+    if conversation.user:
+        if conversation.user.get_full_name():
+            return conversation.user.get_full_name()
+        return conversation.user.username
+    if conversation.title and conversation.title != "New chat":
+        return conversation.title
+    return "Anonymous"
+
+
+def _contact_payload(conversation):
+    contact_email = conversation.email
+    if not contact_email and conversation.user and conversation.user.email:
+        contact_email = conversation.user.email
+    return {
+        "name": _conversation_name(conversation),
+        "email": contact_email,
+        "phone": conversation.phone,
+        "channel": conversation.channel,
+        "note": conversation.note,
+        "is_human": conversation.is_human,
+    }
 
 
 @staff_member_required(login_url="/accounts/login/")
@@ -207,10 +267,112 @@ def docadmin_chat_thread(request, pk):
         Conversation.objects.select_related("user"),
         pk=pk,
     )
+    conversation.contact_data = _contact_payload(conversation)
     return render(
         request,
         "documents/docadmin_chat_thread.html",
         {"conversation": conversation},
+    )
+
+
+@staff_member_required(login_url="/accounts/login/")
+@require_POST
+def docadmin_chat_reply(request, pk):
+    """Persist a staff-authored reply into any conversation (no LLM call)."""
+    conversation = get_object_or_404(Conversation, pk=pk)
+    try:
+        body = json.loads(request.body or b"{}")
+    except json.JSONDecodeError:
+        return JsonResponse({"error": "Invalid JSON body."}, status=400)
+    content = (body.get("content") or "").strip()
+    if not content:
+        return JsonResponse({"error": "content is required."}, status=400)
+    if len(content) > MAX_MESSAGE_LENGTH:
+        return JsonResponse(
+            {"error": f"content must be at most {MAX_MESSAGE_LENGTH} characters."},
+            status=400,
+        )
+
+    message = Message.objects.create(
+        conversation=conversation,
+        role="assistant",
+        content=content,
+        is_human=True,
+    )
+    Conversation.objects.filter(pk=conversation.pk).update(
+        updated_at=timezone.now()
+    )
+    return JsonResponse(
+        {
+            "ok": True,
+            "conversation_id": conversation.pk,
+            "message_id": message.pk,
+            "created_at": message.created_at.isoformat(),
+        }
+    )
+
+
+@staff_member_required(login_url="/accounts/login/")
+@require_POST
+def docadmin_chat_update(request, pk):
+    """Partially update admin-managed fields of a conversation."""
+    conversation = get_object_or_404(Conversation, pk=pk)
+    try:
+        body = json.loads(request.body or b"{}")
+    except json.JSONDecodeError:
+        return JsonResponse({"error": "Invalid JSON body."}, status=400)
+
+    fields = {}
+    if "channel" in body:
+        channel = (body.get("channel") or "").strip()
+        if channel not in dict(Conversation.CHANNEL_CHOICES):
+            return JsonResponse({"error": "Invalid channel."}, status=400)
+        fields["channel"] = channel
+    if "email" in body:
+        fields["email"] = (body.get("email") or "").strip()[:254]
+    if "phone" in body:
+        fields["phone"] = (body.get("phone") or "").strip()[:32]
+    if "note" in body:
+        fields["note"] = body.get("note") or ""
+    if "is_human" in body:
+        fields["is_human"] = bool(body["is_human"])
+
+    if not fields:
+        return JsonResponse({"error": "No fields provided."}, status=400)
+
+    fields["updated_at"] = timezone.now()
+    Conversation.objects.filter(pk=conversation.pk).update(**fields)
+    conversation.refresh_from_db()
+    conversation.contact_data = _contact_payload(conversation)
+    return JsonResponse({"ok": True, "contact": conversation.contact_data})
+
+
+@staff_member_required(login_url="/accounts/login/")
+@require_POST
+def docadmin_chat_create(request):
+    """Create a manual conversation (channel + contact) from the inbox."""
+    try:
+        body = json.loads(request.body or b"{}")
+    except json.JSONDecodeError:
+        return JsonResponse({"error": "Invalid JSON body."}, status=400)
+
+    name = (body.get("name") or "New conversation").strip()[:255]
+    channel = (body.get("channel") or "Website").strip()
+    if channel not in dict(Conversation.CHANNEL_CHOICES):
+        return JsonResponse({"error": "Invalid channel."}, status=400)
+
+    conversation = Conversation.objects.create(
+        title=name,
+        channel=channel,
+        email=(body.get("email") or "").strip()[:254],
+        phone=(body.get("phone") or "").strip()[:32],
+    )
+    return JsonResponse(
+        {
+            "ok": True,
+            "conversation_id": conversation.pk,
+            "contact": _contact_payload(conversation),
+        }
     )
 
 
@@ -361,7 +523,7 @@ def api_chat_stream(request):
             for delta in stream_answer_text(question, context):
                 parts.append(delta)
                 yield sse({"type": "token", "delta": delta})
-            answer = "".join(parts)
+            answer = normalize_answer("".join(parts))
 
             citations = (
                 []

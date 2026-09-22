@@ -7,6 +7,7 @@ from django.db.models import Count, OuterRef, Q, Subquery
 from django.http import JsonResponse, StreamingHttpResponse
 from django.shortcuts import get_object_or_404, render
 from django.utils import timezone
+from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_POST
 
 from .models import Conversation, Message
@@ -376,6 +377,7 @@ def docadmin_chat_create(request):
     )
 
 
+@csrf_exempt
 @require_POST
 def api_chat(request):
     """Non-streaming fallback: returns the complete answer as JSON."""
@@ -428,6 +430,7 @@ def api_chat(request):
     )
 
 
+@csrf_exempt
 @require_POST
 def api_chat_stream(request):
     """Streams the answer as SSE-style events (text/event-stream via fetch).

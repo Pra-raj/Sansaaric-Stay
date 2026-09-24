@@ -53,3 +53,7 @@ Desktop.ini
 *.onnx
 *.h5
 *.bin
+
+# Project docs / planning
+docs/
+.superpowers/

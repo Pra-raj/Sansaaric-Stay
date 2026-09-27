@@ -44,6 +44,7 @@ INSTALLED_APPS = [
     'django.contrib.postgres',
     'document_ingestion',
     'chat',
+    'hotels',
     'rest_framework',
     'drf_spectacular',
     'corsheaders',

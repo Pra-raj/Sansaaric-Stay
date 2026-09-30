@@ -1,23 +1,21 @@
+import uuid
+
 from django.conf import settings
 from django.db import models
 
 
 class Location(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     name = models.CharField(max_length=120)
-    country = models.CharField(max_length=80)
     region = models.CharField(max_length=80, blank=True, default="")
+    latitude = models.DecimalField(max_digits=9, decimal_places=6, null=True, blank=True)
+    longitude = models.DecimalField(max_digits=9, decimal_places=6, null=True, blank=True)
 
     class Meta:
         ordering = ["name"]
-        constraints = [
-            models.UniqueConstraint(
-                fields=["name", "country", "region"],
-                name="unique_location_city",
-            )
-        ]
 
     def __str__(self):
-        return f"{self.name}, {self.country}"
+        return self.name if not self.region else f"{self.name} ({self.region})"
 
 
 class Hotel(models.Model):

@@ -29,6 +29,9 @@ urlpatterns = [
     path("docadmin/", include("document_ingestion.urls")),
     path("", include("chat.urls")),
     path("", include("hotels.urls")),
+    path("", include("rooms.urls")),
+    path("", include("bookings.urls")),
+    path("", include("reviews.urls")),
     path("api/schema/", SpectacularAPIView.as_view(), name="schema"),
     path(
         "api/schema/swagger-ui/",

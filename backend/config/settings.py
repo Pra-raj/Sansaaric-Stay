@@ -45,6 +45,9 @@ INSTALLED_APPS = [
     'document_ingestion',
     'chat',
     'hotels',
+    'bookings',
+    'reviews',
+    'rooms',
     'rest_framework',
     'drf_spectacular',
     'corsheaders',
@@ -205,4 +208,8 @@ SPECTACULAR_SETTINGS = {
     "VERSION": "1.0.0",
     "SERVE_INCLUDE_SCHEMA": False,
     "COMPONENT_SPLIT_REQUEST": True,
+    "ENUM_NAME_OVERRIDES": {
+        "HotelStatusEnum": "hotels.models.Hotel.STATUS_CHOICES",
+        "BookingStatusEnum": "bookings.models.Booking.STATUS_CHOICES",
+    },
 }

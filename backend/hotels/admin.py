@@ -5,8 +5,8 @@ from .models import Hotel, Location
 
 @admin.register(Location)
 class LocationAdmin(admin.ModelAdmin):
-    list_display = ("name", "country", "region")
-    search_fields = ("name", "country")
+    list_display = ("name", "region", "latitude", "longitude")
+    search_fields = ("name", "region")
 
 
 @admin.register(Hotel)

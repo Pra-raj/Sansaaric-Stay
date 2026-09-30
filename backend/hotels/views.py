@@ -1,87 +1,243 @@
 from django.shortcuts import get_object_or_404
-from drf_spectacular.utils import extend_schema
+from drf_spectacular.utils import OpenApiParameter, extend_schema
 from rest_framework import status
-from rest_framework.exceptions import NotAuthenticated, NotFound
+from rest_framework.exceptions import NotAuthenticated, PermissionDenied
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .models import Hotel, Location
+from api.exceptions import Conflict
+from api.pagination import paginated_response
+from api.permissions import IsStaffOrReadOnly, hotel_owner_or_staff, is_hotel_owner
+from api.schema import paginated_response_schema
+from api.serializers import DetailErrorSerializer
+from api.visibility import visible_hotel_list, visible_hotel_or_404
+
+from .models import Location
 from .serializers import (
-    DetailErrorSerializer,
-    HotelCreateSerializer,
-    HotelRoomsSerializer,
+    HotelStaffCreateSerializer,
     HotelSummarySerializer,
+    HotelWriteSerializer,
     LocationSummarySerializer,
+    LocationWriteSerializer,
 )
 
+PAGINATION_PARAMETERS = [
+    OpenApiParameter(
+        "page", int, OpenApiParameter.QUERY, description="Page number (1-based)."
+    ),
+    OpenApiParameter(
+        "page_size", int, OpenApiParameter.QUERY, description="Items per page (max 100)."
+    ),
+]
 
-def _visible_hotel_or_404(hotel_id, user):
-    hotel = get_object_or_404(Hotel.objects.select_related("location"), pk=hotel_id)
-    if hotel.status != Hotel.STATUS_PUBLISHED:
-        is_owner = bool(
-            user
-            and user.is_authenticated
-            and hotel.owner_id == user.id
-        )
-        if not is_owner:
-            raise NotFound()
-    return hotel
+FIELD_ERRORS = {"type": "object", "additionalProperties": {}}
 
 
-@extend_schema(
-    methods=["GET"],
-    tags=["Hotels"],
-    auth=[],
-    responses={200: HotelSummarySerializer(many=True)},
-)
-@extend_schema(
-    methods=["POST"],
-    tags=["Hotels"],
-    auth=[{"SupabaseJWT": []}],
-    request=HotelCreateSerializer,
-    responses={
-        201: HotelSummarySerializer,
-        400: {"type": "object", "additionalProperties": {}},
-        401: DetailErrorSerializer,
-    },
-)
 class HotelListView(APIView):
+    @extend_schema(
+        methods=["GET"],
+        operation_id="hotels_list",
+        tags=["Hotels"],
+        auth=[],
+        parameters=PAGINATION_PARAMETERS,
+        responses={
+            200: paginated_response_schema("PagedHotelList", HotelSummarySerializer)
+        },
+    )
     def get(self, request):
-        hotels = Hotel.objects.filter(status=Hotel.STATUS_PUBLISHED).select_related("location")
-        return Response(HotelSummarySerializer(hotels, many=True).data)
+        queryset = visible_hotel_list(request.user).order_by("-created_at")
+        return paginated_response(queryset, request, self, HotelSummarySerializer)
 
+    @extend_schema(
+        methods=["POST"],
+        operation_id="hotels_create",
+        tags=["Hotels"],
+        auth=[{"SupabaseJWT": []}],
+        request=HotelWriteSerializer,
+        responses={
+            201: HotelSummarySerializer,
+            400: FIELD_ERRORS,
+            401: DetailErrorSerializer,
+            403: DetailErrorSerializer,
+        },
+    )
     def post(self, request):
         if not request.user.is_authenticated:
             raise NotAuthenticated()
-        serializer = HotelCreateSerializer(data=request.data)
+        if not is_hotel_owner(request.user):
+            raise PermissionDenied("Only hotel owners can create hotels.")
+        serializer_class = (
+            HotelStaffCreateSerializer if request.user.is_staff else HotelWriteSerializer
+        )
+        serializer = serializer_class(data=request.data, context={"request": request})
         serializer.is_valid(raise_exception=True)
-        hotel = serializer.save(owner=request.user)
-        return Response(HotelSummarySerializer(hotel).data, status=status.HTTP_201_CREATED)
+        extra = {} if request.user.is_staff else {"owner": request.user}
+        hotel = serializer.save(**extra)
+        return Response(
+            HotelSummarySerializer(hotel).data, status=status.HTTP_201_CREATED
+        )
 
 
-@extend_schema(
-    tags=["Hotels"],
-    responses={200: HotelSummarySerializer, 404: DetailErrorSerializer},
-)
 class HotelDetailView(APIView):
+    @extend_schema(
+        methods=["GET"],
+        operation_id="hotels_retrieve",
+        tags=["Hotels"],
+        auth=[],
+        responses={200: HotelSummarySerializer, 404: DetailErrorSerializer},
+    )
     def get(self, request, hotel_id):
-        hotel = _visible_hotel_or_404(hotel_id, request.user)
+        hotel = visible_hotel_or_404(hotel_id, request.user)
         return Response(HotelSummarySerializer(hotel).data)
 
+    @extend_schema(
+        methods=["PATCH"],
+        operation_id="hotels_update",
+        tags=["Hotels"],
+        auth=[{"SupabaseJWT": []}],
+        request=HotelWriteSerializer,
+        responses={
+            200: HotelSummarySerializer,
+            400: FIELD_ERRORS,
+            401: DetailErrorSerializer,
+            403: DetailErrorSerializer,
+            404: DetailErrorSerializer,
+        },
+    )
+    def patch(self, request, hotel_id):
+        if not request.user.is_authenticated:
+            raise NotAuthenticated()
+        hotel = visible_hotel_or_404(hotel_id, request.user)
+        if not hotel_owner_or_staff(request.user, hotel):
+            raise PermissionDenied()
+        serializer = HotelWriteSerializer(
+            hotel, data=request.data, partial=True, context={"request": request}
+        )
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(HotelSummarySerializer(serializer.instance).data)
 
-@extend_schema(tags=["Hotels"], responses={200: LocationSummarySerializer(many=True)})
+    @extend_schema(
+        methods=["DELETE"],
+        operation_id="hotels_destroy",
+        tags=["Hotels"],
+        auth=[{"SupabaseJWT": []}],
+        request=None,
+        responses={
+            204: None,
+            401: DetailErrorSerializer,
+            403: DetailErrorSerializer,
+            404: DetailErrorSerializer,
+            409: DetailErrorSerializer,
+        },
+    )
+    def delete(self, request, hotel_id):
+        if not request.user.is_authenticated:
+            raise NotAuthenticated()
+        hotel = visible_hotel_or_404(hotel_id, request.user)
+        if not hotel_owner_or_staff(request.user, hotel):
+            raise PermissionDenied()
+        if hotel.rooms.filter(bookings__isnull=False).exists():
+            raise Conflict("Hotel has bookings.")
+        if hotel.reviews.exists():
+            raise Conflict("Hotel has reviews.")
+        hotel.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
 class LocationListView(APIView):
+    permission_classes = [IsStaffOrReadOnly]
+
+    @extend_schema(
+        methods=["GET"],
+        operation_id="locations_list",
+        tags=["Locations"],
+        auth=[],
+        parameters=PAGINATION_PARAMETERS,
+        responses={
+            200: paginated_response_schema(
+                "PagedLocationList", LocationSummarySerializer
+            )
+        },
+    )
     def get(self, request):
-        locations = Location.objects.all()
-        return Response(LocationSummarySerializer(locations, many=True).data)
+        queryset = Location.objects.all().order_by("name")
+        return paginated_response(queryset, request, self, LocationSummarySerializer)
+
+    @extend_schema(
+        methods=["POST"],
+        operation_id="locations_create",
+        tags=["Locations"],
+        auth=[{"SupabaseJWT": []}],
+        request=LocationWriteSerializer,
+        responses={
+            201: LocationSummarySerializer,
+            400: FIELD_ERRORS,
+            401: DetailErrorSerializer,
+            403: DetailErrorSerializer,
+        },
+    )
+    def post(self, request):
+        serializer = LocationWriteSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        location = serializer.save()
+        return Response(
+            LocationSummarySerializer(location).data, status=status.HTTP_201_CREATED
+        )
 
 
-@extend_schema(
-    tags=["Hotels"],
-    auth=[],
-    responses={200: HotelRoomsSerializer, 404: DetailErrorSerializer},
-)
-class HotelRoomsView(APIView):
-    def get(self, request, hotel_id):
-        hotel = _visible_hotel_or_404(hotel_id, request.user)
-        return Response({"hotel_id": hotel.id, "rooms": []})
+class LocationDetailView(APIView):
+    permission_classes = [IsStaffOrReadOnly]
+
+    @extend_schema(
+        methods=["GET"],
+        operation_id="locations_retrieve",
+        tags=["Locations"],
+        auth=[],
+        responses={200: LocationSummarySerializer, 404: DetailErrorSerializer},
+    )
+    def get(self, request, location_id):
+        location = get_object_or_404(Location, pk=location_id)
+        return Response(LocationSummarySerializer(location).data)
+
+    @extend_schema(
+        methods=["PATCH"],
+        operation_id="locations_update",
+        tags=["Locations"],
+        auth=[{"SupabaseJWT": []}],
+        request=LocationWriteSerializer,
+        responses={
+            200: LocationSummarySerializer,
+            400: FIELD_ERRORS,
+            401: DetailErrorSerializer,
+            403: DetailErrorSerializer,
+            404: DetailErrorSerializer,
+        },
+    )
+    def patch(self, request, location_id):
+        location = get_object_or_404(Location, pk=location_id)
+        serializer = LocationWriteSerializer(location, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(LocationSummarySerializer(serializer.instance).data)
+
+    @extend_schema(
+        methods=["DELETE"],
+        operation_id="locations_destroy",
+        tags=["Locations"],
+        auth=[{"SupabaseJWT": []}],
+        request=None,
+        responses={
+            204: None,
+            401: DetailErrorSerializer,
+            403: DetailErrorSerializer,
+            404: DetailErrorSerializer,
+            409: DetailErrorSerializer,
+        },
+    )
+    def delete(self, request, location_id):
+        location = get_object_or_404(Location, pk=location_id)
+        if location.hotels.exists():
+            raise Conflict("Location has hotels.")
+        location.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)

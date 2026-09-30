@@ -8,6 +8,7 @@ build/
 dist/
 venv/
 .venv/
+env/
 db.sqlite3
 .env
 .env.local
@@ -53,3 +54,11 @@ Desktop.ini
 *.onnx
 *.h5
 *.bin
+
+# Generated API schema artifacts (regenerate: manage.py spectacular --file ...)
+backend/reports/
+
+# Project docs / planning
+docs/
+.superpowers/
+env 

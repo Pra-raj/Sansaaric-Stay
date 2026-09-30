@@ -41,13 +41,23 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
+    'django.contrib.postgres',
     'document_ingestion',
     'chat',
+    'hotels',
+    'bookings',
+    'reviews',
+    'rooms',
+    'rest_framework',
+    'drf_spectacular',
+    'corsheaders',
+    'auth',
 ]
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
+    'corsheaders.middleware.CorsMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
@@ -161,5 +171,45 @@ STATIC_URL = 'static/'
 MAILERS = {
     'default': {
         'BACKEND': 'django.core.mail.backends.console.EmailBackend',
+    },
+}
+
+# Supabase Auth (GoTrue) + DRF
+# Read the values from backend/.env (untracked). Verification is asymmetric:
+# JWTs are checked against Supabase's published JWKS (ES256); no JWT secret is stored.
+SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
+SUPABASE_PUBLISHABLE_KEY = os.getenv("SUPABASE_PUBLISHABLE_KEY", "")
+SUPABASE_JWT_AUDIENCE = os.getenv("SUPABASE_JWT_AUDIENCE", "authenticated")
+SUPABASE_JWKS_URL = os.getenv(
+    "SUPABASE_JWKS_URL",
+    f"{SUPABASE_URL}/auth/v1/.well-known/jwks.json",
+)
+
+REST_FRAMEWORK = {
+    "DEFAULT_AUTHENTICATION_CLASSES": ["auth.authentication.SupabaseJWTAuthentication"],
+    "DEFAULT_PERMISSION_CLASSES": ["rest_framework.permissions.AllowAny"],
+    "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
+}
+
+CORS_ALLOWED_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv(
+        "DJANGO_CORS_ALLOWED_ORIGINS", "http://localhost:3000"
+    ).split(",")
+]
+
+SPECTACULAR_SETTINGS = {
+    "TITLE": "Sansaaric Stay API",
+    "DESCRIPTION": (
+        "Sansaaric Stay backend. Auth endpoints exchange email/password for "
+        "Supabase sessions; protected endpoints take a Bearer access token "
+        "(sign in via /api/auth/login or use the Authorize button)."
+    ),
+    "VERSION": "1.0.0",
+    "SERVE_INCLUDE_SCHEMA": False,
+    "COMPONENT_SPLIT_REQUEST": True,
+    "ENUM_NAME_OVERRIDES": {
+        "HotelStatusEnum": "hotels.models.Hotel.STATUS_CHOICES",
+        "BookingStatusEnum": "bookings.models.Booking.STATUS_CHOICES",
     },
 }

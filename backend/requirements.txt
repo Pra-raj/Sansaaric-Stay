@@ -13,3 +13,8 @@ langchain-cohere
 langchain-text-splitters
 unstructured[pdf,docx]
 python-magic
+supabase
+PyJWT
+django-cors-headers
+cryptography
+drf-spectacular

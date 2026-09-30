@@ -111,6 +111,11 @@ The server is available at http://127.0.0.1:8000.
 | `/docadmin/chats/` | Review user conversations | staff |
 | `/admin/` | Django admin | staff |
 | `/accounts/login/` | Login | — |
+| `/api/auth/signup` | Create a Supabase account | anyone |
+| `/api/auth/login` | Exchange email/password for a session | anyone |
+| `/api/auth/refresh` | Rotate a refresh token | anyone |
+| `/api/auth/logout` | Revoke the current Supabase session | Bearer token |
+| `/api/auth/me` | Current (synced) user | Bearer token |
 
 ### Chat API
 

@@ -504,3 +504,263 @@ class StaffInboxTests(TestCase):
         self.assertEqual(response.status_code, 200)
         render_templates = [t.name for t in response.templates]
         self.assertIn("documents/docadmin_chats_list.html", render_templates)
+
+class AdminRegistrationTests(TestCase):
+    """Chat models registered in the Django admin.
+
+    Conversation browsing stays read/write for staff; Message is an
+    append-only transcript whose creation belongs to the inbox endpoints.
+    """
+
+    def setUp(self):
+        from django.contrib.auth.models import User
+
+        self.staff = User.objects.create_user(
+            username="staffer", password="x", is_staff=True, is_superuser=True
+        )
+        self.customer = User.objects.create_user(
+            username="customer", password="x", email="customer@example.com"
+        )
+        self.conversation = Conversation.objects.create(
+            user=self.customer,
+            title="Booking enquiry",
+            channel="Website",
+            email="customer@example.com",
+            note="wants a mountain view",
+        )
+        self.message = Message.objects.create(
+            conversation=self.conversation,
+            role="assistant",
+            content="Here are our rates.",
+            citations=[{"source": "faq.pdf", "page": 4}, {"source": "rates.pdf"}],
+        )
+        self.client.force_login(self.staff)
+
+    def test_both_models_registered(self):
+        from django.contrib import admin
+
+        self.assertIn(Conversation, admin.site._registry)
+        self.assertIn(Message, admin.site._registry)
+
+    def test_admin_index_lists_chat(self):
+        response = self.client.get(reverse("admin:index"))
+        self.assertEqual(response.status_code, 200)
+        apps = [a for a in response.context["available_apps"] if a["name"] == "Chat"]
+        self.assertTrue(apps, "Chat missing from the admin index")
+
+    def test_conversation_changelist_renders(self):
+        response = self.client.get(reverse("admin:chat_conversation_changelist"))
+        self.assertEqual(response.status_code, 200)
+        rows = list(response.context["cl"].result_list)
+        self.assertEqual([c.pk for c in rows], [self.conversation.pk])
+
+    def test_conversation_changelist_annotates_message_count_and_preview(self):
+        response = self.client.get(reverse("admin:chat_conversation_changelist"))
+        row = response.context["cl"].result_list[0]
+        self.assertEqual(row.message_count, 1)
+        self.assertEqual(row.last_message, "Here are our rates.")
+
+    def test_conversation_changelist_links_to_inbox_thread(self):
+        response = self.client.get(reverse("admin:chat_conversation_changelist"))
+        expected = reverse("docadmin_chat_thread", args=[self.conversation.pk])
+        self.assertContains(response, f'href="{expected}"')
+
+    def test_conversation_changelist_search_by_title(self):
+        response = self.client.get(
+            reverse("admin:chat_conversation_changelist"), {"q": "Booking enquiry"}
+        )
+        pks = [c.pk for c in response.context["cl"].result_list]
+        self.assertEqual(pks, [self.conversation.pk])
+
+    def test_conversation_changelist_search_by_customer_email(self):
+        response = self.client.get(
+            reverse("admin:chat_conversation_changelist"), {"q": "customer@exa"}
+        )
+        pks = [c.pk for c in response.context["cl"].result_list]
+        self.assertEqual(pks, [self.conversation.pk])
+
+    def test_conversation_change_page_shows_readonly_transcript_inline(self):
+        url = reverse("admin:chat_conversation_change", args=[self.conversation.pk])
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, 200)
+        formset = response.context["inline_admin_formsets"][0]
+        self.assertEqual(formset.opts.model, Message)
+        # The transcript is displayed, with its citations rendered readably.
+        self.assertContains(response, "Here are our rates.")
+        self.assertContains(response, "faq.pdf p4, rates.pdf")
+        # Read-only inline: no add row, no delete control, no editable fields.
+        self.assertContains(response, 'name="messages-MAX_NUM_FORMS" value="0"')
+        self.assertNotContains(response, "messages-0-DELETE")
+        self.assertNotContains(response, 'name="messages-0-content"')
+        self.assertNotContains(response, 'name="messages-0-role"')
+
+    def test_posting_conversation_cannot_mutate_messages(self):
+        url = reverse("admin:chat_conversation_change", args=[self.conversation.pk])
+        response = self.client.post(
+            url,
+            {
+                "title": "Booking enquiry (edited)",
+                "channel": "Website",
+                "user": str(self.customer.pk),
+                "email": "customer@example.com",
+                "phone": "",
+                "note": "wants a mountain view",
+                "is_human": "on",
+                "messages-TOTAL_FORMS": "1",
+                "messages-INITIAL_FORMS": "1",
+                "messages-MIN_NUM_FORMS": "0",
+                "messages-MAX_NUM_FORMS": "1000",
+                "_save": "Save",
+            },
+        )
+        self.assertEqual(response.status_code, 302)
+        self.conversation.refresh_from_db()
+        self.assertEqual(self.conversation.title, "Booking enquiry (edited)")
+        self.assertTrue(self.conversation.is_human)
+        # The transcript is untouched by the admin edit.
+        self.assertEqual(self.conversation.messages.count(), 1)
+        self.message.refresh_from_db()
+        self.assertEqual(self.message.content, "Here are our rates.")
+
+    def test_message_changelist_renders(self):
+        response = self.client.get(reverse("admin:chat_message_changelist"))
+        self.assertEqual(response.status_code, 200)
+        pks = [m.pk for m in response.context["cl"].result_list]
+        self.assertEqual(pks, [self.message.pk])
+
+    def test_message_changelist_has_no_add_link(self):
+        response = self.client.get(reverse("admin:chat_message_changelist"))
+        self.assertNotContains(
+            response, reverse("admin:chat_message_add"), status_code=200
+        )
+
+    def test_message_add_view_is_refused(self):
+        response = self.client.get(reverse("admin:chat_message_add"))
+        self.assertEqual(response.status_code, 403)
+
+    def test_message_change_view_is_readonly(self):
+        response = self.client.get(
+            reverse("admin:chat_message_change", args=[self.message.pk])
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertNotContains(response, 'name="content"', status_code=200)
+
+    def test_delete_selected_does_not_remove_messages(self):
+        response = self.client.post(
+            reverse("admin:chat_message_changelist"),
+            {
+                "action": "delete_selected",
+                "_selected_action": [str(self.message.pk)],
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(Message.objects.filter(pk=self.message.pk).exists())
+
+    def test_non_staff_cannot_reach_chat_admin(self):
+        from django.contrib.auth.models import User
+
+        plain = User.objects.create_user(username="plain", password="x")
+        self.client.force_login(plain)
+        response = self.client.get(reverse("admin:chat_conversation_changelist"))
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("/admin/login/", response["Location"])
+
+    def test_anonymous_cannot_reach_chat_admin(self):
+        self.client.logout()
+        response = self.client.get(reverse("admin:chat_conversation_changelist"))
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("/admin/login/", response["Location"])
+
+
+class AdminHelperTests(SimpleTestCase):
+    """Display helpers used by the chat admin."""
+
+    def test_contact_prefers_user_full_name(self):
+        from django.contrib.auth.models import User
+        from chat.admin import _contact
+
+        user = User(
+            username="jane",
+            first_name="Jane",
+            last_name="Doe",
+            email="jane@example.com",
+        )
+        self.assertEqual(
+            _contact(Conversation(user=user, title="t", email="", phone="")),
+            "Jane Doe <jane@example.com>",
+        )
+
+    def test_contact_falls_back_to_username(self):
+        from django.contrib.auth.models import User
+        from chat.admin import _contact
+
+        user = User(username="jane", first_name="", last_name="", email="")
+        self.assertEqual(
+            _contact(Conversation(user=user, title="t", email="", phone="")),
+            "jane",
+        )
+
+    def test_contact_falls_back_to_title_then_anonymous(self):
+        from chat.admin import _contact
+
+        self.assertEqual(
+            _contact(Conversation(user=None, title="Booking", email="", phone="")),
+            "Booking",
+        )
+        self.assertEqual(
+            _contact(Conversation(user=None, title="New chat", email="", phone="")),
+            "Anonymous",
+        )
+
+    def test_contact_prefers_explicit_email_over_user_email(self):
+        from django.contrib.auth.models import User
+        from chat.admin import _contact
+
+        user = User(username="jane", first_name="", last_name="", email="old@x.com")
+        self.assertEqual(
+            _contact(Conversation(user=user, title="t", email="new@x.com", phone="")),
+            "jane <new@x.com>",
+        )
+
+    def test_citation_summary_formats_sources(self):
+        from django.contrib import admin
+
+        from chat.admin import MessageInline
+
+        message = Message(
+            citations=[
+                {"source": "faq.pdf", "page": 4},
+                {"source": "rates.pdf"},
+                {"source": "a.pdf"},
+                {"source": "b.pdf"},
+            ]
+        )
+        inline = MessageInline(Message, admin.site)
+        self.assertEqual(
+            inline.citation_summary(message),
+            "faq.pdf p4, rates.pdf, a.pdf (+1 more)",
+        )
+
+    def test_citation_summary_handles_empty_and_malformed(self):
+        from django.contrib import admin
+
+        from chat.admin import MessageInline
+
+        inline = MessageInline(Message, admin.site)
+        self.assertEqual(inline.citation_summary(Message(citations=[])), "—")
+        self.assertEqual(inline.citation_summary(Message(citations=["nope"])), "—")
+        self.assertEqual(inline.citation_summary(Message(citations=None)), "—")
+
+    def test_last_message_preview_flattens_newlines(self):
+        from django.contrib import admin
+
+        conversation_admin = admin.site._registry[Conversation]
+        stub = type("S", (), {"last_message": "line one\nline two"})()
+        self.assertEqual(conversation_admin.last_message(stub), "line one line two")
+
+    def test_last_message_preview_empty(self):
+        from django.contrib import admin
+
+        conversation_admin = admin.site._registry[Conversation]
+        stub = type("S", (), {"last_message": None})()
+        self.assertEqual(conversation_admin.last_message(stub), "—")

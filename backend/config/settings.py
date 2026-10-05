@@ -48,6 +48,7 @@ INSTALLED_APPS = [
     'bookings',
     'reviews',
     'rooms',
+    'recommendations',
     'rest_framework',
     'drf_spectacular',
     'corsheaders',
@@ -213,6 +214,11 @@ LOGGING = {
             'level': LOG_LEVEL,
             'propagate': False,
         },
+        'recommendations': {
+            'handlers': ['console'],
+            'level': LOG_LEVEL,
+            'propagate': False,
+        },
     },
 }
 
@@ -262,4 +268,40 @@ SPECTACULAR_SETTINGS = {
         "HotelStatusEnum": "hotels.models.Hotel.STATUS_CHOICES",
         "BookingStatusEnum": "bookings.models.Booking.STATUS_CHOICES",
     },
+}
+
+# Recommendations
+# Ranking is derived at request time from hotels/rooms/bookings/reviews; there
+# are no recommendation models and no migrations. Weights are deliberately
+# conservative and overridable per environment — they are defensible by
+# inspection rather than tuned against an impression dataset (none exists yet).
+RECOMMENDATIONS = {
+    # How a candidate's Bayesian rating is blended with review volume. Higher
+    # C shrinks small-sample ratings harder toward RATING_PRIOR.
+    "RATING_PRIOR": 3.5,
+    "RATING_PRIOR_WEIGHT": 8.0,
+    # Maximum share of the final score contributed by collaborative filtering.
+    # The actual weight is scaled down by how little history the user has, so a
+    # brand-new user gets pure content/popularity ranking.
+    "CF_WEIGHT": 0.4,
+    # Interactions needed before CF reaches its full CF_WEIGHT.
+    "COLD_START_MIN_INTERACTIONS": 3,
+    # Half-life in days for recency decay on past interactions.
+    "RECENCY_HALF_LIFE_DAYS": 180.0,
+    # Geographic weighting: how strongly distance matters relative to the
+    # categorical property_type / region features.
+    "PROPERTY_TYPE_WEIGHT": 1.5,
+    "REGION_WEIGHT": 1.5,
+    "GEO_WEIGHT": 1.0,
+    "PRICE_WEIGHT": 1.0,
+    "CAPACITY_WEIGHT": 0.5,
+    "QUALITY_WEIGHT": 1.0,
+    # Anonymous popularity ranking: quality weighted by log(review volume).
+    "POPULARITY_WEIGHT": 0.6,
+    # Process-local cache. Short TTL since hotels, reviews and bookings change.
+    "CACHE_TTL_SECONDS": 300,
+    "CACHE_MAX_ENTRIES": 500,
+    "DEFAULT_LIMIT": 8,
+    "DEFAULT_SIMILAR_LIMIT": 6,
+    "MAX_LIMIT": 50,
 }

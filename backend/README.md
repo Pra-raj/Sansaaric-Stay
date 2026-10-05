@@ -117,6 +117,8 @@ The server is available at http://127.0.0.1:8000.
 | `/` | Chat page | anyone |
 | `/api/chat` | Non-streaming answer (POST JSON) | anyone |
 | `/api/chat/stream` | SSE-streamed answer (POST JSON) | anyone |
+| `/api/recommendations` | Personalized (or popularity) hotel picks | anyone |
+| `/api/recommendations/similar/<id>` | Similar stays for a hotel | anyone |
 | `/healthz` | Liveness probe (checks DB connectivity) | anyone |
 | `/docadmin/` | Upload / train / delete documents | staff (login required) |
 | `/docadmin/status/` | Document + chunk status JSON | staff |
@@ -128,6 +130,60 @@ The server is available at http://127.0.0.1:8000.
 | `/api/auth/refresh` | Rotate a refresh token | anyone |
 | `/api/auth/logout` | Revoke the current Supabase session | Bearer token |
 | `/api/auth/me` | Current (synced) user | Bearer token |
+
+### Recommendations
+
+Hybrid content + collaborative ranking, derived per request from `hotels`,
+`rooms`, `bookings` and `reviews`. There are no recommendation models and no
+migrations. See `recommendations/plan.md` for the full design and rationale.
+
+`GET /api/recommendations` — personalized picks for a signed-in user, Bayesian
+quality + review volume for anonymous callers:
+
+```
+/api/recommendations?limit=8&exclude=3,7&check_in=2026-11-01&check_out=2026-11-05&guests=2
+```
+
+| Param | Default | Notes |
+|---|---|---|
+| `limit` | 8 | clamped to `MAX_LIMIT` (50); non-integer or `< 1` → 400 |
+| `exclude` | — | comma-separated hotel ids to drop |
+| `check_in` / `check_out` | — | ISO dates; both or neither → else 400 |
+| `guests` | — | positive int; requires both dates → else 400 |
+
+```json
+{
+  "strategy": "personalized",
+  "cold_start": false,
+  "results": [ /* HotelSummarySerializer */ ]
+}
+```
+
+`strategy` is `personalized` only once a user has enough history for
+collaborative signals to count; during cold start it reports `popular`, so a
+client can label the section honestly instead of asserting a personalization it
+did not receive.
+
+`GET /api/recommendations/similar/<hotel_id>` — related stays by co-stay
+evidence and content fit. 404s when the seed hotel is not visible to the
+caller, and never includes the seed in its own results.
+
+`GET /api/hotels?sort=recommended` — re-ranks the hotel list. Ranking happens
+before pagination so `count` and page boundaries stay consistent. `sort=rating`
+and `sort=price` are also accepted; unknown values fall back to newest first.
+
+Notes:
+
+- **Ratings are computed live** from `Review`, not read from
+  `Hotel.avg_rating`. That denormalized field is not maintained by any signal
+  in this codebase and is only consulted as a fallback for hotels with zero
+  reviews.
+- **Availability is honoured** when `check_in`/`check_out` are supplied. Note
+  that booking *creation* still performs no overlap check — see
+  `recommendations/plan.md`.
+- Results are cached process-locally for `CACHE_TTL_SECONDS` (default 300) and
+  keyed on the caller's identity, so owners and staff never have their own draft
+  properties cached for anonymous callers.
 
 ### Chat API
 
@@ -197,8 +253,10 @@ is required for a single-container deployment.
 ## Tests
 
 The suite covers the chat API (validation, rate limiting, cache, streaming,
-history pairing) and document ingestion (cleaning, tables, loaders, chunking,
-upload limits, worker claim/staleness). DB-backed tests need Postgres with
+history pairing), document ingestion (cleaning, tables, loaders, chunking,
+upload limits, worker claim/staleness), and recommendations (Bayesian rating,
+content and collaborative scoring, cold start, visibility, availability,
+determinism, and `sort=recommended`). DB-backed tests need Postgres with
 pgvector; unit tests run against a plain local install.
 
 ```bash
@@ -208,7 +266,7 @@ docker run -d --name test-pg -e POSTGRES_PASSWORD=postgres \
 
 SUPABASE_DB_HOST=127.0.0.1 SUPABASE_DB_PORT=5432 \
 SUPABASE_DB_USER=postgres SUPABASE_DB_PASSWORD=postgres \
-SUPABASE_DB_SSLMODE=prefer python manage.py test chat document_ingestion
+SUPABASE_DB_SSLMODE=prefer python manage.py test chat document_ingestion recommendations
 ```
 
 CI (`.github/workflows/ci.yml`) runs the same checks against a pgvector service
@@ -227,6 +285,13 @@ backend/
 │       ├── embedding.py     # lazy sentence-transformers wrapper (all-MiniLM-L6-v2)
 │       ├── pipeline.py      # run_training orchestration
 │       └── automation.py    # in-process background worker + startup sweep
+├── recommendations/         # hotel ranking (no models, no migrations)
+│   ├── plan.md              # design doc: signals, weights, trade-offs
+│   ├── signals.py           # batched per-hotel feature extraction
+│   ├── profiles.py          # user taste vector from bookings + reviews
+│   ├── scoring.py           # content / collaborative / popularity + blend
+│   ├── availability.py      # capacity vs overlapping bookings
+│   └── cache.py             # process-local TTL cache
 ├── templates/               # shared base.html, auth templates
 ├── manage.py
 └── requirements.txt

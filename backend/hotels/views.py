@@ -1,3 +1,6 @@
+import logging
+
+from django.db.models import Case, IntegerField, Min, Value, When
 from django.shortcuts import get_object_or_404
 from drf_spectacular.utils import OpenApiParameter, extend_schema
 from rest_framework import status
@@ -28,9 +31,80 @@ PAGINATION_PARAMETERS = [
     OpenApiParameter(
         "page_size", int, OpenApiParameter.QUERY, description="Items per page (max 100)."
     ),
+    OpenApiParameter(
+        "sort",
+        str,
+        OpenApiParameter.QUERY,
+        description=(
+            "Ordering. 'recommended' uses the recommendation engine "
+            "(personalized when authenticated, popularity otherwise); "
+            "'rating' and 'price' are also accepted. Unknown values fall back "
+            "to newest first."
+        ),
+    ),
 ]
 
 FIELD_ERRORS = {"type": "object", "additionalProperties": {}}
+
+logger = logging.getLogger(__name__)
+
+SORT_RECOMMENDED = "recommended"
+SORT_RATING = "rating"
+SORT_PRICE = "price"
+
+# Translating a ranked list back into SQL order needs one CASE/WHEN clause per
+# hotel. That is fine for a normal catalogue but produces a pathological
+# statement for a very large one, so above this size we fall back to a cheap
+# ordering and say so in the logs.
+MAX_RANK_CLAUSES = 1000
+
+
+def _apply_sort(queryset, sort, user):
+    """Order a hotel queryset.
+
+    Recommendation ranking happens here, before pagination, so `count` and page
+    boundaries stay consistent with what the caller sees. Ranking a page after
+    the fact would only shuffle within that page.
+    """
+    if sort == SORT_RECOMMENDED:
+        from recommendations.serializers import (
+            RecommendationParams,
+            rank_visible_hotels,
+        )
+
+        params = RecommendationParams(
+            limit=None, exclude=set(), check_in=None, check_out=None, guests=None
+        )
+        scored, _hotels = rank_visible_hotels(user, params)
+        order = [item.hotel_id for item in scored]
+        if len(order) > MAX_RANK_CLAUSES:
+            logger.warning(
+                "sort=recommended skipped: %d ranked hotels exceeds %d clauses",
+                len(order),
+                MAX_RANK_CLAUSES,
+            )
+            return queryset.order_by("-created_at")
+        # Preset positions for ranked hotels; everything unranked (no rooms, or
+        # filtered out of the recommender's pool) keeps its original ordering at
+        # the end rather than disappearing from the response.
+        return queryset.order_by(
+            Case(
+                *[
+                    When(id=hotel_id, then=Value(position))
+                    for position, hotel_id in enumerate(order)
+                ],
+                default=Value(len(order)),
+                output_field=IntegerField(),
+            ),
+            "-created_at",
+        )
+    if sort == SORT_RATING:
+        return queryset.order_by("-avg_rating", "-created_at")
+    if sort == SORT_PRICE:
+        return queryset.annotate(min_price=Min("rooms__base_price")).order_by(
+            "min_price", "-created_at"
+        )
+    return queryset.order_by("-created_at")
 
 
 class HotelListView(APIView):
@@ -45,7 +119,8 @@ class HotelListView(APIView):
         },
     )
     def get(self, request):
-        queryset = visible_hotel_list(request.user).order_by("-created_at")
+        queryset = visible_hotel_list(request.user)
+        queryset = _apply_sort(queryset, request.query_params.get("sort"), request.user)
         return paginated_response(queryset, request, self, HotelSummarySerializer)
 
     @extend_schema(

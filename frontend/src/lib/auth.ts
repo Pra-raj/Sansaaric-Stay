@@ -17,7 +17,19 @@ function initials(name: string): string {
 
 // eslint-disable-next-line @typescript-eslint/no-unused-vars -- password placeholder until real backend verify
 export async function login(email: string, _password: string): Promise<AuthResult> {
-  const user: AuthUser = { name: "Prayag Raj Karki", email, initials: initials("Prayag Raj Karki") };
+  const user: AuthUser = {
+    name: "Prayag Raj Karki",
+    email,
+    initials: initials("Prayag Raj Karki"),
+    // DEV ONLY (disabled in production builds): any email starting with
+    // "admin@" logs in as an admin so the /admin pages can be tested. Replace with the role from the backend's
+    // login response once real auth exists.
+    role:
+      process.env.NODE_ENV !== "production" &&
+      email.trim().toLowerCase().startsWith("admin@")
+        ? "admin"
+        : "guest",
+  };
   return simulateNetwork({
     user,
     accessToken: `fake-access-${Date.now()}`,
@@ -27,7 +39,7 @@ export async function login(email: string, _password: string): Promise<AuthResul
 
 // eslint-disable-next-line @typescript-eslint/no-unused-vars -- password placeholder until real auth backend exists
 export async function signup(name: string, email: string, _password: string): Promise<AuthResult> {
-  const user: AuthUser = { name, email, initials: initials(name) };
+  const user: AuthUser = { name, email, initials: initials(name), role: "guest" };
   return simulateNetwork({
     user,
     accessToken: `fake-access-${Date.now()}`,

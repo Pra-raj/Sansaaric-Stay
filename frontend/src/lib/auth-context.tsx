@@ -10,17 +10,21 @@ import {
 } from "react";
 import { loadStoredUser } from "./auth";
 import * as auth from "./auth";
+import type { UserRole } from "@/types";
 
 export interface AuthUser {
   name: string;
   email: string;
   initials: string;
   photoUrl?: string;
+  /** Missing on sessions stored before roles existed — treat as "guest". */
+  role?: UserRole;
 }
 
 interface AuthContextValue {
   isLoggedIn: boolean;
   isLoading: boolean;
+  isAdmin: boolean;
   user: AuthUser | null;
   login: (email: string, password: string) => Promise<void>;
   signup: (name: string, email: string, password: string) => Promise<void>;
@@ -46,6 +50,7 @@ export default function AuthProvider({ children }: { children: ReactNode }) {
     () => ({
       isLoggedIn: user !== null,
       isLoading,
+      isAdmin: user?.role === "admin",
       user,
       login: async (email: string, password: string) => {
         const result = await auth.login(email, password);

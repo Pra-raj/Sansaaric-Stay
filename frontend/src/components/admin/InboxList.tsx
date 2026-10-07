@@ -1,61 +1,63 @@
 "use client";
 
-import { Badge } from "@/components/ui/Badge";
-import { channelLabels, formatRelativeTime } from "@/lib/admin-utils";
-import type { InboxMessage } from "@/types";
+import { formatRelativeTime } from "@/lib/admin-utils";
+import type { InboxListItem } from "@/types";
 
 interface InboxListProps {
-  threads: InboxMessage[];
+  threads: InboxListItem[];
   selectedId: string | null;
   onSelect: (id: string) => void;
 }
 
+/**
+ * Column 1 of the inbox, mirroring documents/docadmin_chats_list.html:
+ * avatar, name, snippet + time.
+ */
 export function InboxList({ threads, selectedId, onSelect }: InboxListProps) {
   if (threads.length === 0) {
     return (
       <p className="p-6 text-center text-sm text-ink-soft">
-        No conversations here.
+        No conversations match your filter.
       </p>
     );
   }
 
   return (
-    <ul className="divide-y divide-border/10 overflow-y-auto">
+    <ul className="flex-1 space-y-1 overflow-y-auto p-2">
       {threads.map((thread) => {
-        const unread = thread.status === "Unread";
-        const last = thread.entries[thread.entries.length - 1];
+        const selected = selectedId === thread.id;
         return (
           <li key={thread.id}>
             <button
+              type="button"
               onClick={() => onSelect(thread.id)}
-              aria-current={selectedId === thread.id ? "true" : undefined}
-              className={`block w-full px-4 py-3 text-left ${
-                selectedId === thread.id ? "bg-brand-50" : "hover:bg-bg"
+              aria-current={selected ? "true" : undefined}
+              className={`flex w-full gap-2.5 rounded-lg border px-2.5 py-2.5 text-left transition-colors ${
+                selected
+                  ? "border-border bg-brand-50/60"
+                  : "border-transparent hover:bg-bg"
               }`}
             >
-              <div className="flex items-center gap-2">
-                {unread && (
-                  <span
-                    aria-label="Unread"
-                    className="size-2 shrink-0 rounded-full bg-brand-500"
-                  />
-                )}
-                <span
-                  className={`truncate text-sm ${unread ? "font-bold" : "font-medium"}`}
-                >
-                  {thread.guestName}
+              <span
+                aria-hidden
+                className="size-[34px] shrink-0 rounded-full border border-border/40 bg-ink/10"
+              />
+              <span className="min-w-0 flex-1 pr-12">
+                <span className="block truncate text-[13.5px] font-semibold">
+                  {thread.contactName}
                 </span>
-                <span className="ml-auto shrink-0 text-xs text-ink-soft">
-                  {formatRelativeTime(thread.lastMessageAt)}
+                <span className="mt-0.5 flex items-baseline justify-between gap-2">
+                  <span className="min-w-0 truncate text-xs text-ink-soft">
+                    {thread.snippet || "No messages yet"}
+                  </span>
+                  <span className="flex shrink-0 items-center gap-1.5 text-[11px] text-ink-soft">
+                    <span className="rounded border border-border/60 bg-bg px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide">
+                      {thread.channel}
+                    </span>
+                    {formatRelativeTime(thread.lastMessageAt)}
+                  </span>
                 </span>
-              </div>
-              <p className="mt-0.5 truncate text-sm">{thread.subject}</p>
-              <p className="mt-0.5 truncate text-xs text-ink-soft">
-                {last?.body}
-              </p>
-              <div className="mt-2">
-                <Badge>{channelLabels[thread.channel]}</Badge>
-              </div>
+              </span>
             </button>
           </li>
         );

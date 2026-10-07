@@ -10,23 +10,26 @@ Postgres:
 """
 
 from datetime import timedelta
+from unittest.mock import patch
 
+from django.contrib.auth import get_user_model
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import SimpleTestCase, TestCase
 from django.utils import timezone
-
-from unittest.mock import patch
 
 from document_ingestion.ingestion import cleaning
 from document_ingestion.ingestion.automation import (
     STALE_HEARTBEAT_SECONDS,
     claim_next_document,
+    worker_loop,
 )
 from document_ingestion.ingestion.chunking import chunk_elements
 from document_ingestion.ingestion.loaders import TextDocument, load_source
+from document_ingestion.ingestion.pipeline import run_training
 from document_ingestion.ingestion.tables import clean_cell, html_table_to_text
-from document_ingestion.models import ReferenceDocument
-from document_ingestion.views import UploadForm
+from document_ingestion.models import Chunk, ReferenceDocument
+
+from .serializers import DocumentSerializer
 
 
 class CleaningTests(SimpleTestCase):
@@ -119,37 +122,9 @@ class ChunkingTests(SimpleTestCase):
             self.assertEqual(chunk["tables_html"], [])
 
 
-class UploadFormTests(SimpleTestCase):
-    def _form(self, name, content=b"x", content_type="text/plain"):
-        uploaded = SimpleUploadedFile(name, content, content_type=content_type)
-        return UploadForm(data={}, files={"files": [uploaded]})
-
-    def test_accepts_supported_type(self):
-        form = self._form("guide.md")
-        self.assertTrue(form.is_valid(), form.errors)
-
-    def test_rejects_unsupported_type(self):
-        form = self._form("evil.html")
-        self.assertFalse(form.is_valid())
-        self.assertIn("unsupported type", str(form.errors))
-
-    def test_rejects_missing_extension(self):
-        form = self._form("book")
-        self.assertFalse(form.is_valid())
-        self.assertIn("no extension", str(form.errors))
-
-    def test_rejects_oversized_file(self):
-        big = SimpleUploadedFile("big.pdf", b"x" * 64, content_type="application/pdf")
-        with patch("document_ingestion.views.MAX_UPLOAD_SIZE", 32):
-            form = UploadForm(data={}, files={"files": [big]})
-            self.assertFalse(form.is_valid())
-            self.assertIn("maximum upload size", str(form.errors))
-
-
 class ClaimWorkerTests(TestCase):
     def test_claim_pending_document(self):
         document = ReferenceDocument.objects.create(
-            title="Rates",
             file_name="rates.txt",
             file_type="txt",
             status="pending",
@@ -166,7 +141,6 @@ class ClaimWorkerTests(TestCase):
 
     def test_fresh_processing_document_is_not_reclaimed(self):
         ReferenceDocument.objects.create(
-            title="In flight",
             file_name="a.txt",
             file_type="txt",
             status="processing",
@@ -176,7 +150,6 @@ class ClaimWorkerTests(TestCase):
 
     def test_stale_processing_document_is_reclaimed(self):
         stale = ReferenceDocument.objects.create(
-            title="Orphaned",
             file_name="b.txt",
             file_type="txt",
             status="processing",
@@ -189,7 +162,6 @@ class ClaimWorkerTests(TestCase):
 
     def test_ready_document_is_never_claimed(self):
         ReferenceDocument.objects.create(
-            title="Done",
             file_name="c.txt",
             file_type="txt",
             status="ready",
@@ -199,16 +171,192 @@ class ClaimWorkerTests(TestCase):
 
     def test_oldest_pending_claim_first(self):
         older = ReferenceDocument.objects.create(
-            title="Older",
             file_name="o.txt",
             file_type="txt",
             status="pending",
         )
         ReferenceDocument.objects.create(
-            title="Newer",
             file_name="n.txt",
             file_type="txt",
             status="pending",
         )
         claimed = claim_next_document()
         self.assertEqual(claimed.pk, older.pk)
+
+
+class RunTrainingTests(TestCase):
+    """End-to-end pipeline: parse -> chunk -> embed -> store.
+
+    Source bytes and embeddings are stubbed so no S3 upload or model download
+    happens; the test still exercises chunking, dedupe, atomic replace and the
+    status/error lifecycle.
+    """
+
+    STUB_VECTOR = [0.1] * 384
+
+    def _document(self, content, name="house-rules.txt"):
+        return ReferenceDocument.objects.create(
+            file_name=name,
+            file_type=name.rsplit(".", 1)[-1],
+            file_size=len(content),
+            status="pending",
+        )
+
+    def _train(self, document, content):
+        with patch(
+            "document_ingestion.ingestion.pipeline._read_source",
+            return_value=content.encode(),
+        ), patch(
+            "document_ingestion.ingestion.pipeline.embed_texts",
+            side_effect=lambda contents: [self.STUB_VECTOR for _ in contents],
+        ) as embed:
+            run_training(str(document.document_id))
+        return embed
+
+    def test_trains_document_and_marks_ready(self):
+        document = self._document("Late check-out is 11 AM. ")
+        embed = self._train(document, "Late check-out is 11 AM. ")
+        self.assertEqual(embed.call_count, 1)
+
+        document.refresh_from_db()
+        self.assertEqual(document.status, "ready")
+        chunks = list(Chunk.objects.filter(document=document).order_by("chunk_index"))
+        self.assertTrue(chunks)
+        self.assertEqual(chunks[0].metadata["title"], "house-rules")
+        self.assertEqual(chunks[0].metadata["source"], "house-rules.txt")
+        self.assertTrue(all(c.search_vector is not None for c in chunks))
+
+    def test_retrain_replaces_chunks_atomically(self):
+        document = self._document("Old content only. ")
+        self._train(document, "Old content only. ")
+        original_ids = set(
+            Chunk.objects.filter(document=document).values_list("pk", flat=True)
+        )
+
+        self._train(document, "Brand new content only. ")
+
+        document.refresh_from_db()
+        self.assertEqual(document.status, "ready")
+        new_ids = set(
+            Chunk.objects.filter(document=document).values_list("pk", flat=True)
+        )
+        self.assertTrue(new_ids)
+        self.assertTrue(original_ids.isdisjoint(new_ids))
+
+    def test_no_extractable_text_marks_failed(self):
+        document = self._document("pending")
+        self._train(document, "\n\t  \n  ")
+        document.refresh_from_db()
+        self.assertEqual(document.status, "failed")
+        self.assertEqual(document.error, "no extractable text")
+        self.assertFalse(Chunk.objects.filter(document=document).exists())
+
+
+class WorkerLoopTests(TestCase):
+    """The queue worker drains pending and orphaned-processing documents."""
+
+    def test_drains_pending_and_stale_processing(self):
+        pending = ReferenceDocument.objects.create(
+            file_name="p.txt", file_type="txt", status="pending"
+        )
+        ReferenceDocument.objects.create(
+            file_name="live.txt",
+            file_type="txt",
+            status="processing",
+            worker_heartbeat=timezone.now(),
+        )
+        ReferenceDocument.objects.create(
+            file_name="done.txt", file_type="txt", status="ready"
+        )
+        stale = ReferenceDocument.objects.create(
+            file_name="stale.txt",
+            file_type="txt",
+            status="processing",
+            worker_heartbeat=timezone.now()
+            - timedelta(seconds=STALE_HEARTBEAT_SECONDS + 30),
+        )
+
+        processed = []
+        with patch(
+            "document_ingestion.ingestion.automation._process_claimed",
+            side_effect=lambda doc: processed.append(str(doc.document_id)),
+        ):
+            worker_loop(poll_seconds=0, once=True)
+
+        self.assertEqual(
+            set(processed),
+            {str(pending.document_id), str(stale.document_id)},
+        )
+
+
+# --- Moved from admin_api/tests.py (D10). Auth assertions are repaired in Phase T (C1). ---
+
+
+class DocumentSerializerShape(SimpleTestCase):
+    """Pinned to the exact keys types/index.ts declares."""
+
+    def test_document_exposes_id_not_document_id(self):
+        data = DocumentSerializer(
+            ReferenceDocument(
+                document_id="11111111-2222-3333-4444-555555555555",
+                file_name="rules.pdf",
+                file_type="pdf",
+                file_size=1024,
+                status="ready",
+            )
+        ).data
+        self.assertEqual(data["id"], "11111111-2222-3333-4444-555555555555")
+        self.assertNotIn("document_id", data)
+        self.assertEqual(data["status"], "ready")
+        self.assertNotIn("title", data)
+
+
+class AdminDocumentViews(TestCase):
+    def setUp(self):
+        self.staff = get_user_model().objects.create_user(
+            username="staff@example.com", email="staff@example.com", password="x" * 10,
+            is_staff=True,
+        )
+        self.guest = get_user_model().objects.create_user(
+            username="guest@example.com", email="guest@example.com", password="x" * 10,
+            is_staff=False,
+        )
+
+    def test_documents_require_staff(self):
+        self.assertEqual(self.client.get("/api/admin/documents").status_code, 401)
+        self.client.force_login(self.guest)
+        self.assertEqual(self.client.get("/api/admin/documents").status_code, 403)
+
+    def test_document_round_trip(self):
+        self.client.force_login(self.staff)
+        upload = SimpleUploadedFile(
+            "house-rules.pdf", b"%PDF-1.4 fake", content_type="application/pdf"
+        )
+        response = self.client.post(
+            "/api/admin/documents", {"files": [upload]}
+        )
+        self.assertEqual(response.status_code, 201, response.content)
+        document_id = response.json()[0]["id"]
+
+        listed = self.client.get("/api/admin/documents").json()
+        self.assertEqual([d["id"] for d in listed], [document_id])
+        self.assertEqual(listed[0]["file_name"], "house-rules.pdf")
+        self.assertNotIn("title", listed[0])
+        self.assertEqual(listed[0]["chunk_count"], 0)
+
+        detail = self.client.get(f"/api/admin/documents/{document_id}/content")
+        self.assertEqual(detail.status_code, 200)
+        self.assertEqual(detail.json()["chunks"], [])
+
+        self.client.post(f"/api/admin/documents/{document_id}/train")
+        self.client.delete(f"/api/admin/documents/{document_id}")
+        self.assertFalse(ReferenceDocument.objects.filter(document_id=document_id).exists())
+
+    def test_upload_rejects_unsupported_type(self):
+        self.client.force_login(self.staff)
+        response = self.client.post(
+            "/api/admin/documents",
+            {"files": [SimpleUploadedFile("notes.exe", b"MZ")]},
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("unsupported type", response.json()["files"][0])

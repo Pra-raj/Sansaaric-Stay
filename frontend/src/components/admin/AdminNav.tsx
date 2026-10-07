@@ -15,7 +15,6 @@ import {
 import { Avatar } from "@/components/ui/Avatar";
 import { Badge } from "@/components/ui/Badge";
 import { useAuth } from "@/lib/auth-context";
-import { useUnreadCount } from "./useUnreadCount";
 
 const groups = [
   {
@@ -33,7 +32,7 @@ const groups = [
   {
     label: "Support",
     items: [
-      { name: "Inbox", href: "/admin/inbox", icon: Inbox, badge: true },
+      { name: "Inbox", href: "/admin/inbox", icon: Inbox },
       { name: "Documents", href: "/admin/documents", icon: FileText },
     ],
   },
@@ -47,7 +46,6 @@ const groups = [
 export function AdminNav({ onNavigate }: { onNavigate?: () => void }) {
   const pathname = usePathname();
   const { user, logOut } = useAuth();
-  const unread = useUnreadCount();
 
   return (
     <div className="flex h-full flex-col">
@@ -73,7 +71,6 @@ export function AdminNav({ onNavigate }: { onNavigate?: () => void }) {
                 const exact = "exact" in item && item.exact;
                 const active = exact ? pathname === item.href : pathname.startsWith(item.href);
                 const Icon = item.icon;
-                const showBadge = "badge" in item && item.badge && unread > 0;
                 return (
                   <li key={item.href}>
                     <Link
@@ -88,14 +85,6 @@ export function AdminNav({ onNavigate }: { onNavigate?: () => void }) {
                     >
                       <Icon aria-hidden className="size-[18px] shrink-0" />
                       <span className="flex-1">{item.name}</span>
-                      {showBadge && (
-                        <span
-                          aria-label={`${unread} unread`}
-                          className="rounded-full bg-brand-500 px-2 py-0.5 text-[11px] font-semibold text-white"
-                        >
-                          {unread}
-                        </span>
-                      )}
                     </Link>
                   </li>
                 );

@@ -10,6 +10,7 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/6.1/ref/settings/
 """
 import os
+from django.core.exceptions import ImproperlyConfigured
 from dotenv import load_dotenv
 from pathlib import Path
 
@@ -22,9 +23,16 @@ load_dotenv(BASE_DIR / ".env")
 # See https://docs.djangoproject.com/en/6.1/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "local-dev-key")
+SECRET_KEY = os.getenv("DJANGO_SECRET_KEY")
+if not SECRET_KEY or SECRET_KEY in {"local-dev-key", "change_me"}:
+    raise ImproperlyConfigured(
+        "DJANGO_SECRET_KEY is missing or set to a known-insecure default. "
+        'Generate one: python -c "import secrets; print(secrets.token_urlsafe(64))"'
+    )
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = os.getenv("DJANGO_DEBUG", "1").lower() in ("1", "true")
+DEBUG = os.getenv("DJANGO_DEBUG", "0").lower() in ("1", "true")
+
+SESSION_COOKIE_SAMESITE = "Lax"
 
 ALLOWED_HOSTS = os.getenv("DJANGO_ALLOWED_HOSTS", "localhost,127.0.0.1").split(",")
 
@@ -64,6 +72,7 @@ MIDDLEWARE = [
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
+    'auth.middleware.JWTAuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
@@ -102,7 +111,7 @@ DATABASES = {
         "HOST": os.getenv("SUPABASE_DB_HOST"),
         "PORT": os.getenv("SUPABASE_DB_PORT", "5432"),
         "OPTIONS": {"sslmode": os.getenv("SUPABASE_DB_SSLMODE", "require")},
-        "CONN_MAX_AGE": 60,
+        "CONN_MAX_AGE": 5,
         "CONN_HEALTH_CHECKS": True,
     }
 }
@@ -231,8 +240,9 @@ LOGGING = {
 EMAIL_BACKEND = "django.core.mail.backends.console.EmailBackend"
 
 # Supabase Auth (GoTrue) + DRF
-# Read the values from backend/.env (untracked). Verification is asymmetric:
-# JWTs are checked against Supabase's published JWKS (ES256); no JWT secret is stored.
+# Read the values from backend/.env (untracked). Local JWTs are HS256-signed
+# with DJANGO_SECRET_KEY (auth.local); Supabase tokens are still accepted as a
+# fallback and ES256-verified against Supabase's published JWKS.
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
 SUPABASE_PUBLISHABLE_KEY = os.getenv("SUPABASE_PUBLISHABLE_KEY", "")
 SUPABASE_JWT_AUDIENCE = os.getenv("SUPABASE_JWT_AUDIENCE", "authenticated")
@@ -242,10 +252,20 @@ SUPABASE_JWKS_URL = os.getenv(
 )
 
 REST_FRAMEWORK = {
-    "DEFAULT_AUTHENTICATION_CLASSES": ["auth.authentication.SupabaseJWTAuthentication"],
+    "DEFAULT_AUTHENTICATION_CLASSES": [
+        "auth.authentication.LocalJWTAuthentication",
+        "auth.authentication.SupabaseJWTAuthentication",
+    ],
     "DEFAULT_PERMISSION_CLASSES": ["rest_framework.permissions.AllowAny"],
+    "DEFAULT_THROTTLE_RATES": {"auth": "10/min"},
     "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
 }
+
+if os.getenv("DJANGO_SSL", "0") == "1":
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True
+    SECURE_SSL_REDIRECT = True
+    SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 
 CORS_ALLOWED_ORIGINS = [
     origin.strip()
@@ -257,9 +277,9 @@ CORS_ALLOWED_ORIGINS = [
 SPECTACULAR_SETTINGS = {
     "TITLE": "Sansaaric Stay API",
     "DESCRIPTION": (
-        "Sansaaric Stay backend. Auth endpoints exchange email/password for "
-        "Supabase sessions; protected endpoints take a Bearer access token "
-        "(sign in via /api/auth/login or use the Authorize button)."
+        "Sansaaric Stay backend. Auth endpoints exchange a login (email or "
+        "username) and password for a Bearer access token (sign in via "
+        "/api/auth/login or use the Authorize button)."
     ),
     "VERSION": "1.0.0",
     "SERVE_INCLUDE_SCHEMA": False,

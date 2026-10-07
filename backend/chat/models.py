@@ -27,7 +27,6 @@ class Conversation(models.Model):
     email = models.EmailField(blank=True, default="")
     phone = models.CharField(max_length=32, blank=True, default="")
     note = models.TextField(blank=True, default="")
-    is_human = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -53,11 +52,15 @@ class Message(models.Model):
     role = models.CharField(max_length=16, choices=ROLE_CHOICES)
     content = models.TextField()
     citations = models.JSONField(default=list, blank=True)
-    is_human = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         ordering = ["created_at"]
+        indexes = [
+            # Keys the per-minute rate-limit COUNT (role + created_at>=window)
+            # so a large history stays an index scan, not a seq scan (D-10).
+            models.Index(fields=["role", "created_at"], name="chat_message_role_created_idx"),
+        ]
 
     def __str__(self):
         return f"{self.get_role_display()}: {self.content[:60]}"

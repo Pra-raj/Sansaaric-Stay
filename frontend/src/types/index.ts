@@ -57,43 +57,75 @@ export interface Booking {
 // Admin section
 // ---------------------------------------------------------------------------
 
-export type UserRole = "guest" | "admin";
+/** Mirrors backend Profile.role choices, plus "admin" which comes from is_staff. */
+export type UserRole = "guest" | "hotel_owner" | "admin";
 
-/** Where a conversation came from. Add new channels here as they get wired in. */
-export type InboxChannel = "chatbot" | "contact-form" | "email";
+/** Mirrors chat.Conversation.CHANNEL_CHOICES. */
+export type InboxChannel = "Website" | "Facebook" | "Instagram" | "WhatsApp";
 
-export type InboxStatus = "Unread" | "Open" | "Resolved";
+export const INBOX_CHANNELS: readonly InboxChannel[] = [
+  "Website",
+  "Facebook",
+  "Instagram",
+  "WhatsApp",
+];
 
 export interface InboxEntry {
   id: string;
-  /** "bot" = an automated chatbot answer, shown so admins can see what the guest was told. */
+  /** Who wrote it: the guest, the AI bot, or a staff member. */
   from: "guest" | "admin" | "bot";
   body: string;
   sentAt: string; // ISO timestamp
+  /** Mirrors chat.services.chunk_citation, when the answer came from documents. */
+  citations?: {
+    source?: string;
+    title?: string;
+    page?: number | null;
+    text?: string;
+  }[];
 }
 
-/** One conversation (thread) in the unified inbox. */
-export interface InboxMessage {
+/** One row of the conversation list (GET /admin/inbox). */
+export interface InboxListItem {
   id: string;
   channel: InboxChannel;
-  guestName: string;
-  guestEmail: string;
-  subject: string;
-  status: InboxStatus;
+  contactName: string;
+  contactEmail: string;
+  contactPhone: string;
+  note: string;
   lastMessageAt: string; // ISO timestamp
+  snippet: string;
+  /** Present on thread payloads (list rows may omit them). */
+  createdAt?: string; // ISO timestamp
+  updatedAt?: string; // ISO timestamp
+}
+
+/** A list row plus its full message history (GET /admin/inbox/{id}). */
+export interface InboxThread extends InboxListItem {
   entries: InboxEntry[];
 }
 
-export type TrainingDocumentStatus = "Processing" | "Indexed" | "Failed";
+/** Mirrors ReferenceDocument.status choices from document_ingestion. */
+export type TrainingDocumentStatus = "pending" | "processing" | "ready" | "failed";
 
 export interface TrainingDocument {
   id: string;
   name: string;
-  fileType: "pdf" | "docx" | "txt";
+  fileType: "pdf" | "docx" | "txt" | "md" | "csv" | "xlsx" | "xls";
   sizeBytes: number;
   status: TrainingDocumentStatus;
   uploadedAt: string; // ISO timestamp
   errorMessage?: string;
+  chunkCount: number;
+}
+
+export interface TrainingChunk {
+  index: number;
+  content: string;
+}
+
+export interface TrainingDocumentDetail extends TrainingDocument {
+  chunks: TrainingChunk[];
 }
 
 

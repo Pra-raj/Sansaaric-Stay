@@ -6,12 +6,11 @@ process. The worker claims documents atomically using Postgres row locks
 without a broker.
 
 Deployment modes:
-- Dedicated process (recommended): run `python manage.py trainworker`. This is
-  how a multi-worker web deployment stays safe (no in-process threads, no
-  double training).
-- Single-process dev: set INGESTION_EMBEDDED_WORKER=1 and the thread started
-  from the app's ready() hook will poll the same DB. Both modes may coexist
-  safely because claims are exclusive.
+- In-process (default): the thread started from the app's ready() hook polls
+  the DB, so every served web process ingests automatically. Set
+  INGESTION_EMBEDDED_WORKER=0 to disable (e.g. when a dedicated worker runs).
+- Dedicated process: run `python manage.py trainworker`. Both modes may
+  coexist safely because claims are exclusive (`FOR UPDATE SKIP LOCKED`).
 
 A document stuck in `processing` and not heartbeating for STALE_HEARTBEAT_SECONDS
 is considered orphaned (worker crashed) and is reclaimed automatically.
@@ -84,7 +83,12 @@ def _process_claimed(document):
     def beat():
         while not stop.is_set():
             stop.wait(HEARTBEAT_INTERVAL_SECONDS)
-            _refresh_heartbeat(document_id)
+            try:
+                _refresh_heartbeat(document_id)
+            except Exception:
+                # A missed beat is not fatal; the row just becomes reclaimable
+                # after the stale threshold. Keep the thread alive.
+                logger.warning("Heartbeat refresh failed for %s", document_id, exc_info=True)
 
     heartbeater = threading.Thread(target=beat, daemon=True, name="worker-heartbeat")
     heartbeater.start()
@@ -103,7 +107,12 @@ def _process_claimed(document):
 
 
 def worker_loop(poll_seconds=DEFAULT_POLL_SECONDS, once=False):
-    """Claim and train documents forever (or once when `once=True`)."""
+    """Claim and train documents forever (or drain the queue when once=True).
+
+    With `once`, keep claiming until nothing is left, then return. This makes
+    CLI one-shot runs (e.g. a container that trains then exits) drain a backlog
+    instead of stopping after the first document.
+    """
     while True:
         document = claim_next_document()
         if document is None:
@@ -112,8 +121,6 @@ def worker_loop(poll_seconds=DEFAULT_POLL_SECONDS, once=False):
             time.sleep(poll_seconds)
             continue
         _process_claimed(document)
-        if once:
-            return
 
 
 _embedded_thread = None
@@ -121,14 +128,15 @@ _embedded_lock = threading.Lock()
 
 
 def ensure_embedded_worker():
-    """Start a polling worker thread in this process (dev convenience).
+    """Start a polling worker thread in this process (default).
 
-    Only starts when INGESTION_EMBEDDED_WORKER=1. Web deployments that run a
-    dedicated `python manage.py trainworker` process leave this unset.
-    Combining both is safe (claims are exclusive).
+    On by default so uploads are ingested without a separate process; disable
+    with INGESTION_EMBEDDED_WORKER=0 when a dedicated `python manage.py
+    trainworker` is running instead. Combining both is safe (claims are
+    exclusive).
     """
     global _embedded_thread
-    if not os.getenv("INGESTION_EMBEDDED_WORKER"):
+    if os.getenv("INGESTION_EMBEDDED_WORKER", "").strip().lower() in ("0", "false", "no"):
         return
     with _embedded_lock:
         if _embedded_thread is not None and _embedded_thread.is_alive():

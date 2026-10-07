@@ -1,187 +1,168 @@
+"""Staff-only JSON API backing the Next.js /admin documents page.
+
+Everything here is gated on Django's `is_staff` (api.permissions.IsStaff) and
+expects a token in the Authorization header, which the project's JWT
+authentication resolves to a real User.
+"""
+
 import os
+from datetime import timedelta
 
-from django import forms
-from django.contrib import messages
-from django.contrib.admin.views.decorators import staff_member_required
+from django.core.exceptions import SuspiciousFileOperation
+from django.db import transaction
 from django.db.models import Count
-from django.http import Http404, JsonResponse
-from django.shortcuts import redirect, render
-from django.urls import reverse
-from django.views.decorators.http import require_POST
+from django.shortcuts import get_object_or_404
+from django.utils import timezone
+from drf_spectacular.utils import extend_schema
+from rest_framework import status
+from rest_framework.response import Response
+from rest_framework.views import APIView
 
-from .ingestion.loaders import SUPPORTED_TYPES
+from api.permissions import IsStaff
+from api.serializers import DetailErrorSerializer
+
+from .ingestion.automation import STALE_HEARTBEAT_SECONDS
 from .models import ReferenceDocument
-
-# Reject uploads above this size before they hit object storage or the parser.
-MAX_UPLOAD_SIZE = int(os.getenv("MAX_UPLOAD_SIZE_MB", "50")) * 1024 * 1024
-
-
-class MultipleFileInput(forms.ClearableFileInput):
-    allow_multiple_selected = True
+from .serializers import (
+    DocumentDetailSerializer,
+    DocumentSerializer,
+    DocumentUploadSerializer,
+)
 
 
-class MultipleFileField(forms.FileField):
-    def __init__(self, *args, **kwargs):
-        kwargs.setdefault("widget", MultipleFileInput())
-        super().__init__(*args, **kwargs)
+class DocumentListView(APIView):
+    """Flat list of every reference document, newest first.
 
-    def clean(self, data, initial=None):
-        clean_single = super().clean
-        if isinstance(data, (list, tuple)):
-            return [clean_single(item, initial) for item in data]
-        return [clean_single(data, initial)]
+    Not paginated on purpose: the admin table renders the whole list at once and
+    a document corpus is small (tens of rows).
+    """
 
+    permission_classes = [IsStaff]
 
-class UploadForm(forms.Form):
-    files = MultipleFileField()
-    title = forms.CharField(required=False, max_length=255)
+    @extend_schema(
+        tags=["Admin / Documents"],
+        responses={200: DocumentSerializer(many=True), 403: DetailErrorSerializer},
+    )
+    def get(self, request):
+        queryset = ReferenceDocument.objects.annotate(chunk_count=Count("chunks"))
+        return Response(DocumentSerializer(queryset, many=True).data)
 
-    def clean(self):
-        cleaned = super().clean()
-        title = (cleaned.get("title") or "").strip()
+    @extend_schema(
+        tags=["Admin / Documents"],
+        request=DocumentUploadSerializer,
+        responses={
+            201: DocumentSerializer(many=True),
+            400: DetailErrorSerializer,
+            403: DetailErrorSerializer,
+        },
+    )
+    def post(self, request):
+        serializer = DocumentUploadSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
 
-        for uploaded in cleaned.get("files", []):
-            name = os.path.basename(uploaded.name)
-            ftype = os.path.splitext(name)[1].lower().lstrip(".")
-            if uploaded.size > MAX_UPLOAD_SIZE:
-                self.add_error(
-                    "files",
-                    f"{name}: exceeds the {MAX_UPLOAD_SIZE // (1024 * 1024)} MB "
-                    "maximum upload size.",
-                )
-            if not ftype:
-                self.add_error("files", f"{name}: file has no extension.")
-            elif ftype not in SUPPORTED_TYPES:
-                self.add_error(
-                    "files",
-                    f"{name}: unsupported type .{ftype} (supported: "
-                    + ", ".join(sorted(SUPPORTED_TYPES))
-                    + ").",
-                )
-        return cleaned
-
-
-def staff_json_required(view):
-    def wrapper(request, *args, **kwargs):
-        if not request.user.is_authenticated or not request.user.is_staff:
-            return JsonResponse({"error": "Forbidden"}, status=403)
-        return view(request, *args, **kwargs)
-
-    return wrapper
-
-
-@staff_member_required(login_url="/accounts/login/")
-def docadmin(request):
-    form = UploadForm(request.POST or None, request.FILES or None)
-    if request.method == "POST" and form.is_valid():
-        title = (form.cleaned_data["title"] or "").strip()
         created = []
-
-        for uploaded in form.cleaned_data["files"]:
-            name = os.path.basename(uploaded.name)
-            ftype = os.path.splitext(name)[1].lower().lstrip(".")
-            doc_title = title or os.path.splitext(name)[0]
-            document = ReferenceDocument(
-                title=doc_title,
-                file=uploaded,
-                file_name=name,
-                file_type=ftype,
-                file_size=getattr(uploaded, "size", 0) or len(uploaded.read()),
-                status="pending",
-                uploaded_by=request.user if request.user.is_authenticated else None,
+        try:
+            with transaction.atomic():
+                for uploaded in serializer.validated_data["files"]:
+                    name = os.path.basename(uploaded.name)
+                    document = ReferenceDocument.objects.create(
+                        file=uploaded,
+                        file_name=name,
+                        file_type=os.path.splitext(name)[1].lower().lstrip("."),
+                        file_size=getattr(uploaded, "size", 0) or len(uploaded.read()),
+                        status="pending",
+                        uploaded_by=request.user,
+                    )
+                    created.append(document)
+        except SuspiciousFileOperation:
+            return Response(
+                {"error": "Uploaded filename is not allowed."},
+                status=status.HTTP_400_BAD_REQUEST,
             )
-            document.save()
-            created.append(document)
 
-        for document in created:
-            messages.success(request, f"Queued {document.file_name} for training.")
-
-        if len(created) == 1:
-            return redirect(reverse("docadmin"))
-        if created:
-            messages.success(request, f"Queued {len(created)} documents for training.")
-            return redirect(reverse("docadmin"))
-
-    return render(request, "documents/docadmin.html", {"form": form})
-
-
-@staff_json_required
-def docadmin_status(request):
-    queryset = ReferenceDocument.objects.annotate(chunk_count=Count("chunks"))
-
-    def to_dict(document):
-        return {
-            "document_id": str(document.document_id),
-            "title": document.title,
-            "file_name": document.file_name,
-            "file_type": document.file_type,
-            "file_size": document.file_size,
-            "status": document.status,
-            "error": document.error,
-            "chunk_count": document.chunk_count,
-            "created_at": document.created_at.isoformat(),
-        }
-
-    return JsonResponse([to_dict(doc) for doc in queryset], safe=False)
-
-
-@staff_json_required
-def docadmin_content(request, document_id):
-    """Return a document's metadata plus its trained chunk texts (read-only)."""
-    try:
-        document = ReferenceDocument.objects.get(document_id=document_id)
-    except ReferenceDocument.DoesNotExist:
-        return JsonResponse({"error": "Document not found."}, status=404)
-
-    chunks = list(
-        document.chunks.values("chunk_index", "content").order_by("chunk_index")
-    )
-    return JsonResponse(
-        {
-            "document_id": str(document.document_id),
-            "title": document.title,
-            "file_name": document.file_name,
-            "file_type": document.file_type,
-            "status": document.status,
-            "error": document.error,
-            "chunk_count": len(chunks),
-            "created_at": document.created_at.isoformat(),
-            "updated_at": document.updated_at.isoformat(),
-            "chunks": [
-                {"index": chunk["chunk_index"], "content": chunk["content"]}
-                for chunk in chunks
-            ],
-        }
-    )
-
-
-@staff_member_required(login_url="/accounts/login/")
-@require_POST
-def docadmin_train(request, document_id):
-    try:
-        document = ReferenceDocument.objects.get(document_id=document_id)
-    except ReferenceDocument.DoesNotExist:
-        raise Http404("Document not found")
-
-    if document.status != "pending":
-        ReferenceDocument.objects.filter(pk=document.pk).update(
-            status="pending",
-            error="",
+        return Response(
+            DocumentSerializer(
+                ReferenceDocument.objects.filter(pk__in=[doc.pk for doc in created]),
+                many=True,
+            ).data,
+            status=status.HTTP_201_CREATED,
         )
-    messages.success(request, f"Queued {document.file_name} for re-training.")
-    return redirect(reverse("docadmin"))
 
 
-@staff_member_required(login_url="/accounts/login/")
-@require_POST
-def docadmin_delete(request, document_id):
-    try:
-        document = ReferenceDocument.objects.get(document_id=document_id)
-    except ReferenceDocument.DoesNotExist:
-        raise Http404("Document not found")
+class DocumentTrainView(APIView):
+    """Re-queue a document for (re)training."""
 
-    file_name = document.file_name
-    document.file.delete(save=False)
-    document.delete()
-    messages.success(request, f"Deleted {file_name} and all of its chunks.")
-    return redirect(reverse("docadmin"))
+    permission_classes = [IsStaff]
+
+    @extend_schema(
+        tags=["Admin / Documents"],
+        request=None,
+        responses={
+            200: DocumentSerializer,
+            403: DetailErrorSerializer,
+            404: DetailErrorSerializer,
+        },
+    )
+    def post(self, request, document_id):
+        document = get_object_or_404(ReferenceDocument, document_id=document_id)
+        if (
+            document.status == "processing"
+            and document.worker_heartbeat
+            and document.worker_heartbeat
+            >= timezone.now() - timedelta(seconds=STALE_HEARTBEAT_SECONDS)
+        ):
+            return Response(
+                {"detail": "This document is currently being trained."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if document.status != "pending":
+            ReferenceDocument.objects.filter(pk=document.pk).update(
+                status="pending", error=""
+            )
+        document.refresh_from_db()
+        document = ReferenceDocument.objects.annotate(chunk_count=Count("chunks")).get(
+            pk=document.pk
+        )
+        return Response(DocumentSerializer(document).data)
+
+
+class DocumentDetailView(APIView):
+    """Delete a document, its file on disk, and its chunks."""
+
+    permission_classes = [IsStaff]
+
+    @extend_schema(
+        tags=["Admin / Documents"],
+        request=None,
+        responses={
+            204: None,
+            403: DetailErrorSerializer,
+            404: DetailErrorSerializer,
+        },
+    )
+    def delete(self, request, document_id):
+        document = get_object_or_404(ReferenceDocument, document_id=document_id)
+        document.file.delete(save=False)
+        document.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class DocumentContentView(APIView):
+    """Document metadata plus trained chunk text (read-only)."""
+
+    permission_classes = [IsStaff]
+
+    @extend_schema(
+        tags=["Admin / Documents"],
+        responses={
+            200: DocumentDetailSerializer,
+            403: DetailErrorSerializer,
+            404: DetailErrorSerializer,
+        },
+    )
+    def get(self, request, document_id):
+        document = get_object_or_404(
+            ReferenceDocument.objects.annotate(chunk_count=Count("chunks")),
+            document_id=document_id,
+        )
+        return Response(DocumentDetailSerializer(document).data)

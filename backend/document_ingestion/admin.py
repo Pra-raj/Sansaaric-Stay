@@ -5,9 +5,9 @@ from .models import Chunk, ReferenceDocument
 
 @admin.register(ReferenceDocument)
 class ReferenceDocumentAdmin(admin.ModelAdmin):
-    list_display = ("title", "file_type", "file_size", "status", "created_at")
+    list_display = ("file_name", "file_type", "file_size", "status", "created_at")
     list_filter = ("status", "file_type")
-    search_fields = ("title", "file_name")
+    search_fields = ("file_name",)
     readonly_fields = ("document_id", "file", "file_name", "file_size", "created_at", "updated_at")
 
 

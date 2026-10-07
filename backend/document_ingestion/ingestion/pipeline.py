@@ -4,6 +4,7 @@ Status lifecycle: pending / processing -> ready | failed.
 """
 
 import logging
+import os
 
 from django.contrib.postgres.search import SearchVector
 from django.db import transaction
@@ -17,20 +18,24 @@ from .loaders import SUPPORTED_TYPES, load_source
 logger = logging.getLogger(__name__)
 
 
-def run_training(document_id, source_path=None):
+def run_training(document_id):
     """Train (or re-train) one document and persist its chunks atomically."""
     from document_ingestion.models import Chunk, ReferenceDocument
 
     try:
         document = ReferenceDocument.objects.get(document_id=document_id)
     except ReferenceDocument.DoesNotExist:
-        return {"ok": False, "error": "Document not found", "chunks": 0, "pages": 0, "tables": 0}
+        return
 
     _set_status(document, "processing", "")
 
     try:
-        raw_chunks = _build_raw_chunks(document, source_path)
+        raw_chunks = _build_raw_chunks(document)
         chunks = dedupe(drop_empty(raw_chunks))
+
+        if not chunks:
+            _set_status(document, "failed", "no extractable text")
+            return
 
         contents = [c["content"] for c in chunks]
         vectors = embed_texts(contents)
@@ -52,18 +57,14 @@ def run_training(document_id, source_path=None):
                 Chunk.objects.bulk_create(rows)
                 Chunk.objects.filter(document=document).update(search_vector=SearchVector("content"))
 
-        pages = sorted({c["page"] for c in chunks if c["page"]})
-        tables = {html for c in chunks for html in c["tables_html"]}
         _set_status(document, "ready", "")
-        return {"ok": True, "chunks": len(rows), "pages": pages, "tables": len(tables)}
     except Exception as exc:
         logger.exception("Training failed for %s", document.file_name)
         _set_status(document, "failed", str(exc))
-        return {"ok": False, "error": str(exc), "chunks": 0, "pages": 0, "tables": 0}
 
 
-def _build_raw_chunks(document, source_path):
-    file_content = _read_source(document, source_path)
+def _build_raw_chunks(document):
+    file_content = _read_source(document)
     ftype = document.file_type.lower().lstrip(".")
     if ftype not in SUPPORTED_TYPES:
         raise ValueError(f"Unsupported file type: {ftype!r}")
@@ -71,10 +72,7 @@ def _build_raw_chunks(document, source_path):
     return chunk_elements(elements)
 
 
-def _read_source(document, source_path):
-    if source_path:
-        with open(source_path, "rb") as fh:
-            return fh.read()
+def _read_source(document):
     if document.file:
         document.file.open("rb")
         try:
@@ -87,11 +85,10 @@ def _read_source(document, source_path):
 def _chunk_metadata(document, chunk, index):
     return {
         "document_id": str(document.document_id),
-        "title": document.title,
+        "title": os.path.splitext(document.file_name)[0],
         "source": document.file_name,
         "page": chunk["page"],
         "chunk_index": index,
-        "tables_html": chunk["tables_html"],
     }
 
 

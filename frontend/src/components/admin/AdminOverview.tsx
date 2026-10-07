@@ -34,7 +34,7 @@ import type {
   ActivityEntry,
   AdminBooking,
   AdminHotel,
-  InboxMessage,
+  InboxListItem,
   RevenueSummary,
   TrainingDocument,
 } from "@/types";
@@ -45,7 +45,7 @@ interface Data {
   revenue: RevenueSummary;
   bookings: AdminBooking[];
   hotels: AdminHotel[];
-  threads: InboxMessage[];
+  threads: InboxListItem[];
   docs: TrainingDocument[];
   activity: ActivityEntry[];
 }
@@ -97,8 +97,7 @@ export function AdminOverview() {
       revenueDelta: last && prev ? percentChange(last.revenue, prev.revenue) : null,
       bookingsDelta: last && prev ? percentChange(last.bookings, prev.bookings) : null,
       counts,
-      unread: data.threads.filter((t) => t.status === "Unread").length,
-      failedDocs: data.docs.filter((d) => d.status === "Failed").length,
+      failedDocs: data.docs.filter((d) => d.status === "failed").length,
       inactive: data.hotels.filter((h) => h.status === "Inactive").length,
       active: data.hotels.filter((h) => h.status === "Active").length,
     };
@@ -173,10 +172,9 @@ export function AdminOverview() {
               hint={stats.inactive ? `${stats.inactive} inactive` : "All live"}
             />
             <StatCard
-              label="Unread messages"
-              value={String(stats.unread)}
+              label="Inbox"
+              value={String(data.threads.length)}
               icon={Inbox}
-              hint={stats.unread ? "Waiting for a reply" : "Inbox is clear"}
             />
           </div>
 
@@ -228,10 +226,6 @@ export function AdminOverview() {
               <Card title="Needs attention" bodyClassName="p-2">
                 {(() => {
                   const items = [
-                    stats.unread > 0 && {
-                      href: "/admin/inbox",
-                      text: `${stats.unread} unread ${stats.unread === 1 ? "conversation" : "conversations"}`,
-                    },
                     stats.failedDocs > 0 && {
                       href: "/admin/documents",
                       text: `${stats.failedDocs} ${stats.failedDocs === 1 ? "document" : "documents"} failed to index`,

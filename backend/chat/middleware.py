@@ -7,10 +7,11 @@ logger = logging.getLogger("chat.request")
 
 
 class RequestLoggingMiddleware:
-    """Log one line per request: method, path, remote addr, status, latency.
+    """Log one line per request: method, path, status, latency.
 
-    Placed first in MIDDLEWARE so `request.user` / `request.session` are
-    already populated by the time the response is returned upstream.
+    First in MIDDLEWARE, so it wraps everything. Inner middleware may
+    short-circuit (CORS preflight, WhiteNoise static) without running
+    Session/Auth middleware, so request.session is never read here.
     """
 
     def __init__(self, get_response):
@@ -28,15 +29,11 @@ class RequestLoggingMiddleware:
             )
             raise
         duration_ms = (time.perf_counter() - start) * 1000
-        user = request.user.get_username() if request.user.is_authenticated else "-"
-        session_key = request.session.session_key or "-"
         logger.info(
-            "%s %s -> %d (%.1f ms) user=%s session=%s",
+            "%s %s -> %d (%.1f ms)",
             request.method,
-            request.get_full_path(),
+            request.path,
             response.status_code,
             duration_ms,
-            user,
-            session_key,
         )
         return response

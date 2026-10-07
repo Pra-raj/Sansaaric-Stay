@@ -47,7 +47,9 @@ export default async function HotelDetailPage({
     <div className="mx-auto max-w-6xl px-4 py-8">
       <script
         type="application/ld+json"
-        dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd) }}
+        dangerouslySetInnerHTML={{
+          __html: JSON.stringify(jsonLd).replace(/</g, "\\u003c"),
+        }}
       />
       <div className="grid grid-cols-1 gap-8 lg:grid-cols-[1fr_360px]">
         {/* Left: photo/video gallery placeholder + info */}

@@ -8,6 +8,9 @@ services:
       - ./backend:/app
     env_file:
       - ./backend/.env
+    environment:
+      # The dedicated `worker` service trains; keep the web process out of it.
+      INGESTION_EMBEDDED_WORKER: "0"
     ports:
       - "8000:8000"
     healthcheck:

@@ -2,14 +2,16 @@ import type {
   ActivityCategory,
   AdminBooking,
   HotelStatus,
-  InboxChannel,
-  InboxStatus,
   TrainingDocumentStatus,
 } from "@/types";
 
-export const ALLOWED_DOC_EXTENSIONS: readonly string[] = ["pdf", "docx", "txt"];
-export const MAX_DOC_BYTES = 10 * 1024 * 1024; // 10 MB
-export const DOC_ACCEPT_ATTR = ".pdf,.docx,.txt";
+/** Mirrors document_ingestion.ingestion.loaders.SUPPORTED_TYPES. */
+export const ALLOWED_DOC_EXTENSIONS: readonly string[] = [
+  "pdf", "docx", "txt", "md", "csv", "xlsx", "xls",
+];
+/** Mirrors document_ingestion.views.MAX_UPLOAD_SIZE (MAX_UPLOAD_SIZE_MB=50). */
+export const MAX_DOC_BYTES = 50 * 1024 * 1024;
+export const DOC_ACCEPT_ATTR = ".pdf,.docx,.txt,.md,.csv,.xlsx,.xls";
 
 export function getFileExtension(fileName: string): string {
   const i = fileName.lastIndexOf(".");
@@ -18,11 +20,12 @@ export function getFileExtension(fileName: string): string {
 
 /** Returns an error message, or null when the file can be uploaded. */
 export function validateTrainingFile(file: File): string | null {
-  if (!ALLOWED_DOC_EXTENSIONS.includes(getFileExtension(file.name))) {
-    return `${file.name}: only PDF, DOCX, and TXT files are supported.`;
+  const ext = getFileExtension(file.name);
+  if (!ALLOWED_DOC_EXTENSIONS.includes(ext)) {
+    return `${file.name}: .${ext || "?"} isn't a supported type.`;
   }
   if (file.size === 0) return `${file.name}: the file is empty.`;
-  if (file.size > MAX_DOC_BYTES) return `${file.name}: larger than 10 MB.`;
+  if (file.size > MAX_DOC_BYTES) return `${file.name}: larger than 50 MB.`;
   return null;
 }
 
@@ -42,7 +45,9 @@ export function formatTimestamp(iso: string): string {
 }
 
 export function formatRelativeTime(iso: string): string {
-  const minutes = Math.round((Date.now() - new Date(iso).getTime()) / 60_000);
+  const time = new Date(iso).getTime();
+  if (!iso || !Number.isFinite(time)) return ""; // e.g. empty thread w/ null timestamp
+  const minutes = Math.round((Date.now() - time) / 60_000);
   if (minutes < 1) return "Just now";
   if (minutes < 60) return `${minutes}m ago`;
   const hours = Math.round(minutes / 60);
@@ -51,22 +56,15 @@ export function formatRelativeTime(iso: string): string {
   return `${days}d ago`;
 }
 
-export const channelLabels: Record<InboxChannel, string> = {
-  chatbot: "Chatbot",
-  "contact-form": "Contact form",
-  email: "Email",
-};
-
-export function inboxStatusTone(status: InboxStatus) {
-  if (status === "Unread") return "brand" as const;
-  if (status === "Open") return "warning" as const;
-  return "neutral" as const;
+export function docStatusTone(status: TrainingDocumentStatus) {
+  if (status === "ready") return "success" as const;
+  if (status === "pending" || status === "processing") return "warning" as const;
+  return "danger" as const;
 }
 
-export function docStatusTone(status: TrainingDocumentStatus) {
-  if (status === "Indexed") return "success" as const;
-  if (status === "Processing") return "warning" as const;
-  return "danger" as const;
+/** Sentence-case label for the backend's lower-case status values. */
+export function docStatusLabel(status: TrainingDocumentStatus): string {
+  return status.charAt(0).toUpperCase() + status.slice(1);
 }
 
 export function formatCurrency(amount: number): string {
@@ -100,9 +98,6 @@ export function bookingStatusTone(status: AdminBooking["status"]) {
 export function hotelStatusTone(status: HotelStatus) {
   return status === "Active" ? ("success" as const) : ("neutral" as const);
 }
-
-/** Fired by the inbox page so the sidebar's unread badge can refresh. */
-export const INBOX_CHANGED = "admin:inbox-changed";
 
 export const activityCategoryLabels: Record<ActivityCategory, string> = {
   hotel: "Hotels",

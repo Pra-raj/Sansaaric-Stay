@@ -40,7 +40,7 @@ export const LIMITS = {
   amenity: 40,
   amenities: 20,
   maxPrice: 1_000_000,
-  replyBody: 5000,
+  replyBody: 4000,
 } as const;
 
 const PROPERTY_TYPES = ["Hotel", "Resort", "Homestay"] as const;
@@ -148,11 +148,15 @@ export async function validateFileSignature(file: File): Promise<string | null> 
   if (ext === "pdf" && !startsWith([0x25, 0x50, 0x44, 0x46, 0x2d])) {
     return `${file.name}: this doesn't look like a real PDF.`;
   }
-  if (ext === "docx" && !startsWith([0x50, 0x4b, 0x03, 0x04])) {
-    return `${file.name}: this doesn't look like a real DOCX file.`;
+  const zipTypes = ["docx", "xlsx"];
+  if (zipTypes.includes(ext) && !startsWith([0x50, 0x4b, 0x03, 0x04])) {
+    return `${file.name}: this doesn't look like a real .${ext} file.`;
   }
-  if (ext === "txt" && head.includes(0)) {
-    return `${file.name}: this doesn't look like a plain text file.`;
+  if (ext === "xls" && !startsWith([0xd0, 0xcf, 0x11, 0xe0])) {
+    return `${file.name}: this doesn't look like a real .xls file.`;
+  }
+  if (["txt", "md", "csv"].includes(ext) && head.includes(0)) {
+    return `${file.name}: this doesn't look like plain text.`;
   }
   return null;
 }

@@ -2,131 +2,106 @@ import type {
   ActivityEntry,
   AdminBooking,
   AdminHotel,
-  InboxMessage,
+  InboxListItem,
+  InboxThread,
   TrainingDocument,
 } from "@/types";
 
 const minutesAgo = (m: number) =>
   new Date(Date.now() - m * 60_000).toISOString();
 
-/** Dummy data used until the backend inbox endpoints exist. */
-export const dummyInbox: InboxMessage[] = [
+/** Dummy conversations for mock-mode development. Shape matches GET /admin/inbox. */
+export const dummyInbox: InboxListItem[] = [
   {
-    id: "th-1001",
-    channel: "chatbot",
-    guestName: "Anita Gurung",
-    guestEmail: "anita.gurung@example.com",
-    subject: "Check-in time for the Pokhara homestay",
-    status: "Unread",
+    id: "1001",
+    channel: "Website",
+    contactName: "Anita Gurung",
+    contactEmail: "anita.gurung@example.com",
+    contactPhone: "9841122334",
+    note: "Check-in time for the Pokhara homestay",
     lastMessageAt: minutesAgo(12),
-    entries: [
-      {
-        id: "en-1",
-        from: "guest",
-        body: "Hi, what time can we check in? Our bus arrives in Pokhara around 9 AM.",
-        sentAt: minutesAgo(15),
-      },
-      {
-        id: "en-2",
-        from: "bot",
-        body: "Standard check-in starts at 2 PM. I couldn't find early check-in details for this property, so I've passed your question to the team.",
-        sentAt: minutesAgo(14),
-      },
-      {
-        id: "en-3",
-        from: "guest",
-        body: "Okay, please let me know if early check-in is possible.",
-        sentAt: minutesAgo(12),
-      },
-    ],
+    snippet: "Okay, please let me know if early check-in is possible.",
   },
   {
-    id: "th-1002",
-    channel: "contact-form",
-    guestName: "Rohan Shrestha",
-    guestEmail: "rohan.shrestha@example.com",
-    subject: "Refund for a cancelled booking",
-    status: "Unread",
+    id: "1002",
+    channel: "Facebook",
+    contactName: "Rohan Shrestha",
+    contactEmail: "rohan.shrestha@example.com",
+    contactPhone: "9803554411",
+    note: "Refund for a cancelled booking",
     lastMessageAt: minutesAgo(95),
-    entries: [
-      {
-        id: "en-4",
-        from: "guest",
-        body: "I cancelled booking bk-2041 three days ago but the refund hasn't reached my eSewa account yet. Can you check the status?",
-        sentAt: minutesAgo(95),
-      },
-    ],
+    snippet: "I cancelled booking bk-2041 three days ago but the refund hasn't reached my eSewa account yet.",
   },
   {
-    id: "th-1003",
-    channel: "email",
-    guestName: "Mira Thapa",
-    guestEmail: "mira.thapa@example.com",
-    subject: "Do you have homestays near Bandipur?",
-    status: "Open",
+    id: "1003",
+    channel: "WhatsApp",
+    contactName: "Mira Thapa",
+    contactEmail: "mira.thapa@example.com",
+    contactPhone: "9851778899",
+    note: "Do you have homestays near Bandipur?",
     lastMessageAt: minutesAgo(60 * 5),
-    entries: [
-      {
-        id: "en-5",
-        from: "guest",
-        body: "We're a family of five looking for a homestay near Bandipur in November. Do you have anything with two rooms?",
-        sentAt: minutesAgo(60 * 6),
-      },
-      {
-        id: "en-6",
-        from: "admin",
-        body: "Namaste Mira! We have two family-friendly homestays near Bandipur. I'll send the details shortly.",
-        sentAt: minutesAgo(60 * 5),
-      },
-    ],
+    snippet: "Namaste Mira! We have two family-friendly homestays near Bandipur.",
   },
   {
-    id: "th-1004",
-    channel: "chatbot",
-    guestName: "Kabir Rai",
-    guestEmail: "kabir.rai@example.com",
-    subject: "Are pets allowed?",
-    status: "Open",
+    id: "1004",
+    channel: "Website",
+    contactName: "Kabir Rai",
+    contactEmail: "kabir.rai@example.com",
+    contactPhone: "9860112233",
+    note: "Are pets allowed?",
     lastMessageAt: minutesAgo(60 * 26),
-    entries: [
-      {
-        id: "en-7",
-        from: "guest",
-        body: "Can I bring my dog to the homestays in Nagarkot?",
-        sentAt: minutesAgo(60 * 26),
-      },
-      {
-        id: "en-8",
-        from: "bot",
-        body: "Pet policies are set by each host. I don't have a policy on file for Nagarkot stays, so a team member will follow up.",
-        sentAt: minutesAgo(60 * 26),
-      },
-    ],
+    snippet: "Pet policies are set by each host. I don't have a policy on file for Nagarkot stays.",
   },
   {
-    id: "th-1005",
-    channel: "contact-form",
-    guestName: "Sita Karki",
-    guestEmail: "sita.karki@example.com",
-    subject: "Thank you!",
-    status: "Resolved",
+    id: "1005",
+    channel: "Instagram",
+    contactName: "Sita Karki",
+    contactEmail: "sita.karki@example.com",
+    contactPhone: "9849556677",
+    note: "Thank you!",
     lastMessageAt: minutesAgo(60 * 50),
-    entries: [
-      {
-        id: "en-9",
-        from: "guest",
-        body: "Just wanted to say our stay in Ghandruk was wonderful. Thank you for the quick help with the booking.",
-        sentAt: minutesAgo(60 * 51),
-      },
-      {
-        id: "en-10",
-        from: "admin",
-        body: "Thank you, Sita! We're glad you enjoyed it. Hope to host you again soon.",
-        sentAt: minutesAgo(60 * 50),
-      },
-    ],
+    snippet: "Thank you, Sita! We're glad you enjoyed it. Hope to host you again soon.",
   },
 ];
+
+/** Full histories for the thread pane; keyed by the same ids as above. */
+export const dummyInboxThreads: Record<string, InboxThread> = {
+  "1001": {
+    ...dummyInbox[0],
+    entries: [
+      { id: "en-1", from: "guest", body: "Hi, what time can we check in? Our bus arrives in Pokhara around 9 AM.", sentAt: minutesAgo(15) },
+      { id: "en-2", from: "bot", body: "Standard check-in starts at 2 PM. I couldn't find early check-in details for this property, so I've passed your question to the team.", sentAt: minutesAgo(14) },
+      { id: "en-3", from: "guest", body: "Okay, please let me know if early check-in is possible.", sentAt: minutesAgo(12) },
+    ],
+  },
+  "1002": {
+    ...dummyInbox[1],
+    entries: [
+      { id: "en-4", from: "guest", body: "I cancelled booking bk-2041 three days ago but the refund hasn't reached my eSewa account yet. Can you check the status?", sentAt: minutesAgo(95) },
+    ],
+  },
+  "1003": {
+    ...dummyInbox[2],
+    entries: [
+      { id: "en-5", from: "guest", body: "We're a family of five looking for a homestay near Bandipur in November. Do you have anything with two rooms?", sentAt: minutesAgo(60 * 6) },
+      { id: "en-6", from: "admin", body: "Namaste Mira! We have two family-friendly homestays near Bandipur. I'll send the details shortly.", sentAt: minutesAgo(60 * 5) },
+    ],
+  },
+  "1004": {
+    ...dummyInbox[3],
+    entries: [
+      { id: "en-7", from: "guest", body: "Can I bring my dog to the homestays in Nagarkot?", sentAt: minutesAgo(60 * 26) },
+      { id: "en-8", from: "bot", body: "Pet policies are set by each host. I don't have a policy on file for Nagarkot stays, so a team member will follow up.", sentAt: minutesAgo(60 * 26) },
+    ],
+  },
+  "1005": {
+    ...dummyInbox[4],
+    entries: [
+      { id: "en-9", from: "guest", body: "Just wanted to say our stay in Ghandruk was wonderful. Thank you for the quick help with the booking.", sentAt: minutesAgo(60 * 51) },
+      { id: "en-10", from: "admin", body: "Thank you, Sita! We're glad you enjoyed it. Hope to host you again soon.", sentAt: minutesAgo(60 * 50) },
+    ],
+  },
+};
 
 export const dummyTrainingDocuments: TrainingDocument[] = [
   {
@@ -134,25 +109,28 @@ export const dummyTrainingDocuments: TrainingDocument[] = [
     name: "cancellation-and-refund-policy.pdf",
     fileType: "pdf",
     sizeBytes: 482_000,
-    status: "Indexed",
+    status: "ready",
     uploadedAt: minutesAgo(60 * 24 * 6),
+    chunkCount: 34,
   },
   {
     id: "doc-2",
     name: "homestay-house-rules.docx",
     fileType: "docx",
     sizeBytes: 96_500,
-    status: "Indexed",
+    status: "ready",
     uploadedAt: minutesAgo(60 * 24 * 3),
+    chunkCount: 12,
   },
   {
     id: "doc-3",
     name: "scanned-host-agreement.pdf",
     fileType: "pdf",
     sizeBytes: 2_310_000,
-    status: "Failed",
+    status: "failed",
     uploadedAt: minutesAgo(60 * 24),
     errorMessage: "No text could be extracted. The PDF looks like a scan.",
+    chunkCount: 0,
   },
 ];
 

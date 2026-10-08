@@ -35,7 +35,11 @@ services:
       - ./backend/.env
 
   frontend:
-    build: ./frontend
+    build:
+      context: ./frontend
+      args:
+        # Inlined into the browser bundle; must be a host-reachable URL.
+        NEXT_PUBLIC_API_BASE_URL: http://localhost:8000/api
     ports:
       - "3000:3000"
     environment:

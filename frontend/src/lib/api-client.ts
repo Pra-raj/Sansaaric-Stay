@@ -1,5 +1,6 @@
-import { dummyBookings, dummyHotels, dummyReviews, topDestinations } from "./placeholder-data";
+import { dummyBookings, dummyHotels, dummyReviews } from "./placeholder-data";
 import { getAccessToken, refreshAccessToken, clearSession } from "./auth";
+import { API_BASE_URL } from "./api-base";
 import { simulateNetwork } from "./simulate-network";
 import { getFileExtension } from "./admin-utils";
 import {
@@ -15,7 +16,6 @@ import type {
   AdminHotel,
   AdminHotelInput,
   Booking,
-  Destination,
   Hotel,
   InboxChannel,
   InboxListItem,
@@ -27,8 +27,6 @@ import type {
   TrainingDocumentDetail,
   TrainingDocumentStatus,
 } from "@/types";
-
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000/api";
 
 export class ApiError extends Error {
   status: number;
@@ -115,6 +113,85 @@ async function apiList<T>(path: string): Promise<T[]> {
   return Array.isArray(data) ? data : data.results ?? [];
 }
 
+// ---------------------------------------------------------------------------
+// Backend → UI normalizers (same pattern as normalizeInbox/normalizeDocument)
+// ---------------------------------------------------------------------------
+
+/** Backend HotelSummarySerializer payload (hotels, recommendations). */
+interface RawHotel {
+  id: number | string;
+  name: string;
+  property_type?: string;
+  location?: { name?: string; region?: string } | null;
+  description?: string;
+  avg_rating?: number | string;
+  min_price?: number | string | null;
+}
+
+function titleCase(value: string): string {
+  return value.charAt(0).toUpperCase() + value.slice(1);
+}
+
+function normalizeHotel(raw: RawHotel): Hotel {
+  const loc = raw.location;
+  return {
+    id: String(raw.id),
+    name: raw.name ?? "",
+    location: [loc?.name, loc?.region].filter(Boolean).join(", "),
+    propertyType: titleCase(raw.property_type ?? "hotel"),
+    rating: Number(raw.avg_rating ?? 0),
+    startingPrice: Number(raw.min_price ?? 0),
+    tags: [],
+    amenities: [],
+    description: raw.description ?? "",
+  };
+}
+
+/** Backend public review: identity is deliberately never exposed. */
+interface RawHotelReview {
+  id: number | string;
+  rating: number | string;
+  comment?: string;
+}
+
+function normalizeReview(raw: RawHotelReview): Review {
+  return {
+    id: String(raw.id),
+    authorName: "Guest",
+    rating: Number(raw.rating),
+    comment: raw.comment ?? "",
+  };
+}
+
+/** Backend BookingSummarySerializer payload. */
+interface RawBooking {
+  id: string;
+  hotel_name?: string;
+  hotel_location?: string;
+  check_in: string;
+  check_out: string;
+  guests: number;
+  status: "pending" | "confirmed" | "cancelled" | "completed";
+}
+
+function normalizeBooking(raw: RawBooking): Booking {
+  const status: Booking["status"] =
+    raw.status === "completed"
+      ? "Completed"
+      : raw.status === "cancelled"
+        ? "Cancelled"
+        : "Upcoming";
+  return {
+    id: String(raw.id),
+    hotelName: raw.hotel_name ?? "Hotel",
+    location: raw.hotel_location ?? "",
+    checkIn: raw.check_in,
+    checkOut: raw.check_out,
+    guests: raw.guests,
+    status,
+  };
+}
+
 export interface HotelSearchParams {
   location?: string;
   minPrice?: number;
@@ -140,7 +217,8 @@ export async function getHotels(params: HotelSearchParams = {}): Promise<Hotel[]
   if (params.minRating !== undefined) search.set("minRating", String(params.minRating));
   const qs = search.toString();
   try {
-    return await apiList<Hotel>(`/hotels${qs ? `?${qs}` : ""}`);
+    const rows = await apiList<RawHotel>(`/hotels${qs ? `?${qs}` : ""}`);
+    return rows.map(normalizeHotel);
   } catch (err) {
     return fallbackOrThrow(err, () => {
       let results = dummyHotels;
@@ -159,31 +237,36 @@ export async function getHotels(params: HotelSearchParams = {}): Promise<Hotel[]
 
 export async function getHotelById(id: string): Promise<Hotel | null> {
   try {
-    return await apiFetch<Hotel>(`/hotels/${id}`);
+    return await apiFetch<RawHotel>(`/hotels/${id}`).then(normalizeHotel);
   } catch (err) {
+    if (err instanceof ApiError && err.status === 404) return null;
     return fallbackOrThrow(err, () => simulateNetwork(dummyHotels.find((h) => h.id === id) ?? null));
   }
 }
 
 export async function getHotelReviews(hotelId: string): Promise<Review[]> {
   try {
-    return await apiList<Review>(`/hotels/${hotelId}/reviews`);
+    const rows = await apiList<RawHotelReview>(`/hotels/${hotelId}/reviews`);
+    return rows.map(normalizeReview);
   } catch (err) {
     return fallbackOrThrow(err, () => simulateNetwork(dummyReviews));
   }
 }
 
-export async function getDestinations(): Promise<Destination[]> {
+/** Personalized (or popularity-ranked) picks from the recommendation engine. */
+export async function getRecommendations(limit = 8): Promise<Hotel[]> {
   try {
-    return await apiList<Destination>("/destinations");
+    const rows = await apiList<RawHotel>(`/recommendations?limit=${limit}`);
+    return rows.map(normalizeHotel);
   } catch (err) {
-    return fallbackOrThrow(err, () => simulateNetwork(topDestinations));
+    return fallbackOrThrow(err, () => simulateNetwork(dummyHotels));
   }
 }
 
 export async function getMyBookings(): Promise<Booking[]> {
   try {
-    return await apiList<Booking>("/bookings");
+    const rows = await apiList<RawBooking>("/bookings");
+    return rows.map(normalizeBooking);
   } catch (err) {
     return fallbackOrThrow(err, () => simulateNetwork(dummyBookings));
   }
@@ -207,19 +290,21 @@ export async function createBooking(payload: CreateBookingPayload): Promise<Book
       body: JSON.stringify(payload),
     });
   } catch (err) {
-    return fallbackOrThrow(err, () => {
-      const hotel = dummyHotels.find((h) => h.id === payload.hotelId);
-      const fakeBooking: Booking = {
-        id: `bk-${Math.floor(Math.random() * 9000 + 1000)}`,
-        hotelName: hotel?.name ?? "Unknown hotel",
-        location: hotel?.location ?? "",
-        checkIn: payload.checkIn,
-        checkOut: payload.checkOut,
-        guests: payload.guests,
-        status: "Upcoming",
-      };
-      return simulateNetwork(fakeBooking, 800);
-    });
+    // ponytail: the booking flow is still demo-only — the backend wants
+    // {room_id, check_in, check_out, guests} and this UI has no room picker
+    // yet. Show the fake confirmation in dev; production surfaces the error.
+    if (!isMockAllowed()) throw err;
+    const hotel = dummyHotels.find((h) => h.id === payload.hotelId);
+    const fakeBooking: Booking = {
+      id: `bk-${Math.floor(Math.random() * 9000 + 1000)}`,
+      hotelName: hotel?.name ?? "Unknown hotel",
+      location: hotel?.location ?? "",
+      checkIn: payload.checkIn,
+      checkOut: payload.checkOut,
+      guests: payload.guests,
+      status: "Upcoming",
+    };
+    return simulateNetwork(fakeBooking, 800);
   }
 }
 

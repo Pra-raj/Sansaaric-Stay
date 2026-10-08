@@ -9,6 +9,8 @@ Postgres:
         .venv/bin/python manage.py test document_ingestion
 """
 
+import threading
+import time
 from datetime import timedelta
 from unittest.mock import patch
 
@@ -288,6 +290,46 @@ class WorkerLoopTests(TestCase):
             {str(pending.document_id), str(stale.document_id)},
         )
 
+    def test_heartbeat_thread_survives_a_failed_refresh(self):
+        # C6: an exception escaping the beat loop killed the heartbeat thread,
+        # so the row went stale-reclaimable while a worker was still training
+        # it and a second worker picked it up.
+        from document_ingestion.ingestion import automation
+
+        document = ReferenceDocument.objects.create(
+            file_name="slow.txt", file_type="txt", status="processing"
+        )
+        uncaught = []
+        started = threading.Event()
+        previous_hook = threading.excepthook
+        threading.excepthook = lambda args: uncaught.append(args)
+
+        def slow_training(_document_id):
+            started.set()
+            time.sleep(0.1)
+
+        def failing_refresh(_document_id):
+            raise RuntimeError("transient db error")
+
+        try:
+            with patch(
+                "document_ingestion.ingestion.pipeline.run_training",
+                side_effect=slow_training,
+            ), patch.object(
+                automation, "_refresh_heartbeat", side_effect=failing_refresh
+            ), patch.object(automation, "HEARTBEAT_INTERVAL_SECONDS", 0.01):
+                worker = threading.Thread(
+                    target=automation._process_claimed, args=(document,)
+                )
+                worker.start()
+                worker.join(timeout=15)
+                self.assertFalse(worker.is_alive())
+        finally:
+            threading.excepthook = previous_hook
+
+        self.assertTrue(started.is_set())
+        self.assertEqual(uncaught, [])
+
 
 # --- Moved from admin_api/tests.py (D10). Auth assertions are repaired in Phase T (C1). ---
 
@@ -313,6 +355,8 @@ class DocumentSerializerShape(SimpleTestCase):
 
 class AdminDocumentViews(TestCase):
     def setUp(self):
+        from auth import local
+
         self.staff = get_user_model().objects.create_user(
             username="staff@example.com", email="staff@example.com", password="x" * 10,
             is_staff=True,
@@ -321,42 +365,130 @@ class AdminDocumentViews(TestCase):
             username="guest@example.com", email="guest@example.com", password="x" * 10,
             is_staff=False,
         )
+        # DRF with JWT-only auth (no SessionAuthentication), so a session from
+        # force_login is ignored — send a Bearer token instead.
+        self.staff_token = local.issue_session(self.staff).access_token
+        self.guest_token = local.issue_session(self.guest).access_token
+
+    def _as(self, token):
+        return {"HTTP_AUTHORIZATION": f"Bearer {token}"}
+
+    def _raw_upload(self, filename):
+        """Upload with a literal multipart filename, bypassing the test client's
+        own sanitization of SimpleUploadedFile names."""
+        boundary = "phaseTRawBoundary"
+        body = (
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="files"; filename="{filename}"\r\n'
+            "Content-Type: application/pdf\r\n\r\n"
+            "%PDF-1.4 fake\r\n"
+            f"--{boundary}--\r\n"
+        ).encode()
+        return self.client.post(
+            "/api/admin/documents",
+            data=body,
+            content_type=f"multipart/form-data; boundary={boundary}",
+            **self._as(self.staff_token),
+        )
 
     def test_documents_require_staff(self):
         self.assertEqual(self.client.get("/api/admin/documents").status_code, 401)
-        self.client.force_login(self.guest)
-        self.assertEqual(self.client.get("/api/admin/documents").status_code, 403)
+        self.assertEqual(
+            self.client.get("/api/admin/documents", **self._as(self.guest_token)).status_code,
+            403,
+        )
 
     def test_document_round_trip(self):
-        self.client.force_login(self.staff)
         upload = SimpleUploadedFile(
             "house-rules.pdf", b"%PDF-1.4 fake", content_type="application/pdf"
         )
         response = self.client.post(
-            "/api/admin/documents", {"files": [upload]}
+            "/api/admin/documents", {"files": [upload]}, **self._as(self.staff_token)
         )
         self.assertEqual(response.status_code, 201, response.content)
         document_id = response.json()[0]["id"]
 
-        listed = self.client.get("/api/admin/documents").json()
+        listed = self.client.get("/api/admin/documents", **self._as(self.staff_token)).json()
         self.assertEqual([d["id"] for d in listed], [document_id])
         self.assertEqual(listed[0]["file_name"], "house-rules.pdf")
         self.assertNotIn("title", listed[0])
         self.assertEqual(listed[0]["chunk_count"], 0)
 
-        detail = self.client.get(f"/api/admin/documents/{document_id}/content")
+        detail = self.client.get(
+            f"/api/admin/documents/{document_id}/content", **self._as(self.staff_token)
+        )
         self.assertEqual(detail.status_code, 200)
         self.assertEqual(detail.json()["chunks"], [])
 
-        self.client.post(f"/api/admin/documents/{document_id}/train")
-        self.client.delete(f"/api/admin/documents/{document_id}")
+        self.client.post(
+            f"/api/admin/documents/{document_id}/train", **self._as(self.staff_token)
+        )
+        self.client.delete(
+            f"/api/admin/documents/{document_id}", **self._as(self.staff_token)
+        )
         self.assertFalse(ReferenceDocument.objects.filter(document_id=document_id).exists())
 
     def test_upload_rejects_unsupported_type(self):
-        self.client.force_login(self.staff)
         response = self.client.post(
             "/api/admin/documents",
             {"files": [SimpleUploadedFile("notes.exe", b"MZ")]},
+            **self._as(self.staff_token),
         )
         self.assertEqual(response.status_code, 400)
         self.assertIn("unsupported type", response.json()["files"][0])
+
+    def test_upload_rejects_content_that_fails_the_extension(self):
+        # S3: a Windows executable renamed to .pdf passes an extension check.
+        response = self.client.post(
+            "/api/admin/documents",
+            {"files": [SimpleUploadedFile("notes.pdf", b"MZ\x90\x00" + b"\x00" * 64)]},
+            **self._as(self.staff_token),
+        )
+        self.assertEqual(response.status_code, 400, response.content)
+        self.assertIn("does not match", response.json()["files"][0])
+        self.assertEqual(ReferenceDocument.objects.count(), 0)
+
+    def test_upload_never_stores_a_traversal_filename(self):
+        # C22: a `..` shaped filename used to escape as a 500. Django now drops
+        # the part (400) or sanitizes it to its basename (201) — what must never
+        # happen is a server error or a path reaching the `file_name` column.
+        for name in ("..", ".", "", "../../etc/cron.pdf"):
+            with self.subTest(filename=name):
+                response = self._raw_upload(name)
+                self.assertLess(response.status_code, 500, response.content)
+                for document in ReferenceDocument.objects.all():
+                    self.assertNotIn("/", document.file_name)
+                    self.assertNotIn("\\", document.file_name)
+                ReferenceDocument.objects.all().delete()
+
+    def test_train_rejects_a_document_a_worker_is_training(self):
+        # C6: re-queueing a live document lets two workers train it at once.
+        document = ReferenceDocument.objects.create(
+            file_name="live.txt",
+            file_type="txt",
+            status="processing",
+            worker_heartbeat=timezone.now(),
+        )
+        response = self.client.post(
+            f"/api/admin/documents/{document.document_id}/train",
+            **self._as(self.staff_token),
+        )
+        self.assertEqual(response.status_code, 400, response.content)
+        document.refresh_from_db()
+        self.assertEqual(document.status, "processing")
+
+    def test_train_allows_reclaiming_a_stale_document(self):
+        document = ReferenceDocument.objects.create(
+            file_name="stale.txt",
+            file_type="txt",
+            status="processing",
+            worker_heartbeat=timezone.now()
+            - timedelta(seconds=STALE_HEARTBEAT_SECONDS + 30),
+        )
+        response = self.client.post(
+            f"/api/admin/documents/{document.document_id}/train",
+            **self._as(self.staff_token),
+        )
+        self.assertEqual(response.status_code, 200, response.content)
+        document.refresh_from_db()
+        self.assertEqual(document.status, "pending")

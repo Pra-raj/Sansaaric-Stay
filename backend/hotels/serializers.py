@@ -18,12 +18,17 @@ class LocationSummarySerializer(serializers.ModelSerializer):
 class HotelSummarySerializer(serializers.ModelSerializer):
     owner_id = serializers.IntegerField(read_only=True)
     location = LocationSummarySerializer(read_only=True)
+    # Cheapest room, annotated by api.visibility.visible_hotel_*.
+    min_price = serializers.DecimalField(
+        max_digits=10, decimal_places=2, read_only=True
+    )
 
     class Meta:
         model = Hotel
         fields = [
             "id", "owner_id", "name", "property_type", "location",
-            "address", "description", "status", "avg_rating", "created_at",
+            "address", "description", "status", "avg_rating", "min_price",
+            "created_at",
         ]
         read_only_fields = fields
 

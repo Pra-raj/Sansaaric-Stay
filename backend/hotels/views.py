@@ -1,6 +1,6 @@
 import logging
 
-from django.db.models import Case, IntegerField, Min, Value, When
+from django.db.models import Case, IntegerField, Value, When
 from django.shortcuts import get_object_or_404
 from drf_spectacular.utils import OpenApiParameter, extend_schema
 from rest_framework import status
@@ -101,9 +101,8 @@ def _apply_sort(queryset, sort, user):
     if sort == SORT_RATING:
         return queryset.order_by("-avg_rating", "-created_at")
     if sort == SORT_PRICE:
-        return queryset.annotate(min_price=Min("rooms__base_price")).order_by(
-            "min_price", "-created_at"
-        )
+        # min_price is already annotated by visible_hotel_list().
+        return queryset.order_by("min_price", "-created_at")
     return queryset.order_by("-created_at")
 
 

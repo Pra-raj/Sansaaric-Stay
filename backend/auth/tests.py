@@ -1,6 +1,10 @@
 import json
+import os
+import subprocess
+import sys
 import time
 import uuid
+from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 import jwt
@@ -8,6 +12,7 @@ import yaml
 from cryptography.hazmat.primitives.asymmetric import ec
 from django.conf import settings
 from django.contrib.auth import get_user_model
+from django.core.cache import cache
 from django.db import IntegrityError
 from django.test import SimpleTestCase, TestCase
 from rest_framework import exceptions
@@ -27,6 +32,71 @@ class SettingsTest(SimpleTestCase):
 
     def test_default_audience(self):
         self.assertEqual(settings.SUPABASE_JWT_AUDIENCE, "authenticated")
+
+    # S1/A5 run against a fresh import of the settings module, because the
+    # values under test are read once at import time. backend/.env loading is
+    # disabled in the child so a developer's local file can't mask a defect.
+
+    BACKEND_DIR = Path(__file__).resolve().parent.parent
+
+    def _import_settings(self, body, env=None):
+        code = (
+            "import os, sys\n"
+            "sys.path.insert(0, os.environ['BACKEND_DIR'])\n"
+            "import dotenv\n"
+            "dotenv.load_dotenv = lambda *a, **k: None\n" + body
+        )
+        child_env = dict(os.environ, BACKEND_DIR=str(self.BACKEND_DIR))
+        child_env.pop("DJANGO_SECRET_KEY", None)
+        child_env.pop("DJANGO_DEBUG", None)
+        child_env.update(env or {})
+        return subprocess.run(
+            [sys.executable, "-c", code],
+            env=child_env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+
+    @staticmethod
+    def _probe(code):
+        return (
+            "try:\n"
+            f"    {code}\n"
+            "except Exception as exc:\n"
+            "    print(type(exc).__name__)\n"
+            "else:\n"
+            "    print('imported')\n"
+        )
+
+    def test_missing_secret_key_fails_closed(self):
+        result = self._import_settings(self._probe("import config.settings"))
+        self.assertEqual(result.stdout.strip(), "ImproperlyConfigured", result.stderr)
+
+    def test_insecure_default_secret_key_is_rejected(self):
+        for default in ("local-dev-key", "change_me"):
+            with self.subTest(secret=default):
+                result = self._import_settings(
+                    self._probe("import config.settings"),
+                    {"DJANGO_SECRET_KEY": default},
+                )
+                self.assertEqual(
+                    result.stdout.strip(), "ImproperlyConfigured", result.stderr
+                )
+
+    def test_debug_defaults_off(self):
+        result = self._import_settings(
+            "import config.settings as s\nprint('DEBUG=' + str(s.DEBUG))\n",
+            {"DJANGO_SECRET_KEY": "x" * 50},
+        )
+        self.assertEqual(result.stdout.strip(), "DEBUG=False", result.stderr)
+
+    def test_debug_can_be_switched_on_explicitly(self):
+        result = self._import_settings(
+            "import config.settings as s\nprint('DEBUG=' + str(s.DEBUG))\n",
+            {"DJANGO_SECRET_KEY": "x" * 50, "DJANGO_DEBUG": "1"},
+        )
+        self.assertEqual(result.stdout.strip(), "DEBUG=True", result.stderr)
 
 
 class ProfileModelTest(TestCase):
@@ -199,15 +269,23 @@ class LocalJWTAuthenticationTest(TestCase):
         self.assertIsNone(self._auth().authenticate(self._request(refresh)))
 
     def test_expired_token_is_rejected(self):
+        # A9: sign with the real key (sha256(SECRET_KEY)) so only `exp` is
+        # wrong — the previous raw-SECRET_KEY signature failed verification
+        # before ever reaching the expiry check. Prove the signature/claims
+        # are otherwise valid, then that expiry is what rejects the token.
         token = jwt.encode(
             {
                 "sub": str(self.user.pk), "typ": "access",
                 "iat": int(time.time()) - 200, "exp": int(time.time()) - 100,
             },
-            settings.SECRET_KEY, algorithm="HS256",
+            local._SIGNING_KEY, algorithm="HS256",
         )
-        with self.assertRaises(exceptions.AuthenticationFailed):
-            self._auth().authenticate(self._request(token))
+        verified = jwt.decode(token, local._SIGNING_KEY, algorithms=["HS256"],
+                              options={"verify_exp": False})
+        self.assertEqual(verified["sub"], str(self.user.pk))
+        # Expired local tokens are deferred to the next authenticator, so
+        # LocalJWT returns None (does not authenticate them).
+        self.assertIsNone(self._auth().authenticate(self._request(token)))
 
     def test_inactive_user_is_rejected(self):
         self.user.is_active = False
@@ -220,11 +298,14 @@ class LocalJWTAuthenticationTest(TestCase):
 class SignupLoginViewTest(TestCase):
     def setUp(self):
         self.client = APIClient()
+        # The A1 auth throttle is 10/min per IP; every test here shares
+        # 127.0.0.1, so without a reset the history bleeds across tests.
+        cache.clear()
 
     def test_signup_creates_user_and_returns_session(self):
         response = self.client.post(
             "/api/auth/signup",
-            {"email": "jane@example.com", "password": "s3cret", "full_name": "Jane Doe"},
+            {"email": "jane@example.com", "password": "Sunrise-Lodge-7", "full_name": "Jane Doe"},
             format="json",
         )
         self.assertEqual(response.status_code, 201)
@@ -239,7 +320,7 @@ class SignupLoginViewTest(TestCase):
     def test_signup_without_name_uses_empty_first_name(self):
         response = self.client.post(
             "/api/auth/signup",
-            {"email": "no-name@example.com", "password": "s3cret"},
+            {"email": "no-name@example.com", "password": "Sunrise-Lodge-7"},
             format="json",
         )
         self.assertEqual(response.status_code, 201)
@@ -249,11 +330,22 @@ class SignupLoginViewTest(TestCase):
         User.objects.create_user(username="taken", email="taken@example.com", password="pw")
         response = self.client.post(
             "/api/auth/signup",
-            {"email": "taken@example.com", "password": "s3cret"},
+            {"email": "taken@example.com", "password": "Sunrise-Lodge-7"},
             format="json",
         )
         self.assertEqual(response.status_code, 409)
         self.assertEqual(response.json()["error"], "user_already_registered")
+
+    def test_signup_weak_password_rejected(self):
+        # A2: AUTH_PASSWORD_VALIDATORS run server-side, so a password the UI
+        # would reject never creates an account.
+        response = self.client.post(
+            "/api/auth/signup",
+            {"email": "weak@example.com", "password": "s3cret"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(User.objects.filter(email="weak@example.com").exists())
 
     def test_login_by_email_returns_access_token(self):
         User.objects.create_user(
@@ -301,10 +393,25 @@ class SignupLoginViewTest(TestCase):
         )
         self.assertEqual(response.status_code, 401)
 
+    def test_login_scope_returns_429_after_n_attempts(self):
+        # A1: the `auth` scope (10/min per IP) stops credential stuffing.
+        statuses = [
+            self.client.post(
+                "/api/auth/login",
+                {"email": "nobody@example.com", "password": "wrong-pass"},
+                format="json",
+            ).status_code
+            for _ in range(11)
+        ]
+        self.assertEqual(statuses[-1], 429)
+        self.assertIn(401, statuses)  # earlier attempts still reach the view
+
 
 class RefreshLogoutMeViewTest(TestCase):
     def setUp(self):
         self.client = APIClient()
+        # Shares the A1 `auth` throttle bucket (10/min per IP) above.
+        cache.clear()
         self.user = User.objects.create_user(
             username="demo.admin", email="demo.admin@sansaaric.com",
             password="SuperAdmin@123", first_name="Sansaaric",

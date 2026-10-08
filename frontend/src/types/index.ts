@@ -15,7 +15,8 @@ export interface Hotel {
   id: string;
   name: string;
   location: string;
-  propertyType: "Hotel" | "Resort" | "Homestay";
+  /** Title-cased backend property_type (Hotel, Resort, Homestay, Villa, ...). */
+  propertyType: string;
   rating: number;
   startingPrice: number;
   tags: string[];

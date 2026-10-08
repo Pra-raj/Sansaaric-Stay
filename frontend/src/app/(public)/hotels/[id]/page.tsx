@@ -85,14 +85,16 @@ export default async function HotelDetailPage({
             </p>
           </div>
 
-          <div>
-            <h2 className="mb-2 font-semibold">Amenities</h2>
-            <ul className="grid grid-cols-2 gap-2 text-sm text-ink-soft sm:grid-cols-3">
-              {hotel.amenities.map((amenity) => (
-                <li key={amenity}>· {amenity}</li>
-              ))}
-            </ul>
-          </div>
+          {hotel.amenities.length > 0 && (
+            <div>
+              <h2 className="mb-2 font-semibold">Amenities</h2>
+              <ul className="grid grid-cols-2 gap-2 text-sm text-ink-soft sm:grid-cols-3">
+                {hotel.amenities.map((amenity) => (
+                  <li key={amenity}>· {amenity}</li>
+                ))}
+              </ul>
+            </div>
+          )}
 
           <div>
             <h2 className="mb-3 font-semibold">Reviews</h2>

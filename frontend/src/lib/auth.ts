@@ -1,7 +1,6 @@
 import type { AuthUser } from "./auth-context";
 import type { UserRole } from "@/types";
-
-const AUTH_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000/api";
+import { API_BASE_URL as AUTH_BASE_URL } from "./api-base";
 
 const ACCESS_TOKEN_KEY = "sansaaric-access-token";
 const REFRESH_TOKEN_KEY = "sansaaric-refresh-token";

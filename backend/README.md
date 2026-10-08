@@ -255,7 +255,8 @@ single-container deployment.
 
 The suite covers the chat API (validation, rate limiting, cache, streaming,
 history pairing), document ingestion (cleaning, tables, loaders, chunking,
-upload limits, worker claim/staleness), and recommendations (Bayesian rating,
+upload limits, worker claim/staleness), auth (signup/login/refresh/logout,
+password rules, throttle, JWT decode), and recommendations (Bayesian rating,
 content and collaborative scoring, cold start, visibility, availability,
 determinism, and `sort=recommended`). DB-backed tests need Postgres with
 pgvector; unit tests run against a plain local install.
@@ -267,11 +268,11 @@ docker run -d --name test-pg -e POSTGRES_PASSWORD=postgres \
 
 SUPABASE_DB_HOST=127.0.0.1 SUPABASE_DB_PORT=5432 \
 SUPABASE_DB_USER=postgres SUPABASE_DB_PASSWORD=postgres \
-SUPABASE_DB_SSLMODE=prefer python manage.py test chat document_ingestion recommendations
+SUPABASE_DB_SSLMODE=prefer python manage.py test chat document_ingestion auth recommendations
 ```
 
-CI (`.github/workflows/ci.yml`) runs the same checks against a pgvector service
-container.
+Run the gate locally (no CI is configured): the command above for the
+documented apps, or `python manage.py test` for the full suite.
 
 ## Project layout
 

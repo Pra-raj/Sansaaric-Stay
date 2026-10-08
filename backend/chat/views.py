@@ -393,6 +393,10 @@ class InboxReplyView(APIView):
             role="assistant",
             content=serializer.validated_data["content"],
         )
+        # C9: the inbox orders on Conversation.updated_at, which auto_now only
+        # touches on a save of the row itself. Without this the replied thread
+        # stays where it was and never rises to the top of the list.
+        conversation.save(update_fields=["updated_at"])
 
         return Response(
             InboxThreadSerializer(conversation).data, status=status.HTTP_201_CREATED
@@ -593,7 +597,8 @@ def api_chat_stream(request):
             parts = []
             for delta in stream_answer_text(question, context):
                 parts.append(delta)
-                yield sse({"type": "token", "delta": delta})
+                # §5 SSE contract: the token payload key is "text".
+                yield sse({"type": "token", "text": delta})
             answer = normalize_answer("".join(parts))
 
             citations = (

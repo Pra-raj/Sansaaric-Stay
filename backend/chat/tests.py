@@ -5,11 +5,13 @@ Run:  .venv/bin/python manage.py test chat
 
 import datetime
 import json
+import threading
 from datetime import timedelta
 from unittest.mock import MagicMock, patch
 
 from django.contrib.auth import get_user_model
-from django.test import Client, SimpleTestCase, TestCase
+from django.db import connections
+from django.test import Client, SimpleTestCase, TestCase, TransactionTestCase
 from django.urls import reverse
 from django.utils import timezone
 
@@ -438,6 +440,15 @@ class ChatApiTests(TestCase):
 
     @patch("chat.views.answer_question", return_value=("A", []))
     def test_history_free_answers_use_cache(self, mock):
+        # C7 gates the cache on a non-empty corpus (so a "no documents"
+        # answer is never cached), so the test needs a ready chunk first.
+        doc = ReferenceDocument.objects.create(
+            file_name="guide.txt", file_type="txt", file_size=10, status="ready"
+        )
+        Chunk.objects.create(
+            document=doc, content="checkout is at 11",
+            embedding=[0.5] * 384, chunk_index=1,
+        )
         session_key = self._client_session_key()
         c1 = Conversation.objects.create(session_key=session_key)
         c2 = Conversation.objects.create(session_key=session_key)
@@ -512,6 +523,44 @@ class ChatApiTests(TestCase):
             Message.objects.create(conversation=conversation, role="user", content="spam")
         blocked = self._post_chat({"message": "blocked", "conversation_id": conversation.pk})
         self.assertEqual(blocked.status_code, 429)
+
+    def test_malformed_conversation_id_is_rejected(self):
+        # C4: every one of these used to reach int()/filter() and raise 500.
+        for bad in ("abc", "-1", "0", "1.5", " "):
+            with self.subTest(conversation_id=bad):
+                self.assertEqual(
+                    self._post_chat({"message": "hi", "conversation_id": bad}).status_code,
+                    400,
+                )
+                self.assertEqual(
+                    self.client.post(
+                        reverse("api_chat_stream"),
+                        data=json.dumps({"message": "hi", "conversation_id": bad}),
+                        content_type="application/json",
+                    ).status_code,
+                    400,
+                )
+        self.assertEqual(Conversation.objects.count(), 0)
+
+    @patch("chat.views.answer_question", return_value=(NO_DOCUMENTS_MESSAGE, []))
+    def test_no_documents_answer_is_never_cached(self, _mock):
+        # C7: caching the canned empty-corpus reply would keep serving it for
+        # 30 minutes after the first document is trained.
+        response = self._post_chat({"message": "What time is checkout?"})
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNone(cached_answer("What time is checkout?"))
+
+    @patch("chat.views.answer_question", side_effect=RuntimeError("boom"))
+    def test_chat_error_carries_conversation_id(self, _mock):
+        # U14: without it the widget starts a fresh thread and strands the turn.
+        response = self._post_chat({"message": "What time is checkout?"})
+        self.assertEqual(response.status_code, 500)
+        body = response.json()
+        self.assertIsNotNone(body["conversation_id"])
+        conversation = Conversation.objects.get(pk=body["conversation_id"])
+        self.assertEqual(
+            list(conversation.messages.values_list("role", flat=True)), ["user"]
+        )
 
 
 class ChatIdentityTests(TestCase):
@@ -850,6 +899,90 @@ class ChatStreamTests(TestCase):
         self.assertEqual(events[-1]["type"], "done")
         self.assertTrue(events[-1]["answer"].startswith("Of course"))
 
+    @staticmethod
+    def _rag_context():
+        def fake_retrieve(_q, _h):
+            doc = Document(
+                page_content="content",
+                metadata={"source": "guide.txt", "chunk_pk": 1},
+            )
+            return "reformulated?", [doc]
+
+        fake_chunk = MagicMock()
+        fake_chunk.objects.exists.return_value = True
+        return fake_chunk, fake_retrieve
+
+    def test_stream_tokens_join_to_done_answer(self):
+        # C25: tokens must use the §5 `text` key and their concatenation must
+        # equal the `done` payload (and the stored answer).
+        def fake_stream(_q, _c):
+            yield "Check"
+            yield "out"
+            yield " at 11."
+
+        fake_chunk, fake_retrieve = self._rag_context()
+
+        with patch("document_ingestion.models.Chunk", fake_chunk), patch(
+            "chat.views.retrieve", side_effect=fake_retrieve
+        ), patch("chat.views.stream_answer_text", side_effect=fake_stream):
+            response = self.client.post(
+                reverse("api_chat_stream"),
+                data=json.dumps({"message": "When is checkout?"}),
+                content_type="application/json",
+            )
+            events = _sse_events(response)
+
+        tokens = [e for e in events if e["type"] == "token"]
+        done = [e for e in events if e["type"] == "done"]
+        self.assertEqual(len(done), 1)
+        self.assertEqual(
+            [t["text"] for t in tokens], ["Check", "out", " at 11."]
+        )
+        self.assertEqual(done[0]["answer"], "".join(t["text"] for t in tokens))
+        self.assertEqual(
+            list(
+                Message.objects.filter(role="assistant").values_list(
+                    "content", flat=True
+                )
+            ),
+            [done[0]["answer"]],
+        )
+
+    def test_stream_emits_terminal_error_when_generation_fails(self):
+        # C8: a mid-stream failure must end the event stream with a terminal
+        # `error`, not leave the widget waiting forever.
+        def fake_retrieve(_q, _h):
+            doc = Document(
+                page_content="content",
+                metadata={"source": "guide.txt", "chunk_pk": 1},
+            )
+            return "reformulated?", [doc]
+
+        def broken_stream(_q, _c):
+            yield "partial"
+            raise RuntimeError("provider exploded")
+
+        fake_chunk = MagicMock()
+        fake_chunk.objects.exists.return_value = True
+
+        with patch("document_ingestion.models.Chunk", fake_chunk), patch(
+            "chat.views.retrieve", side_effect=fake_retrieve
+        ), patch("chat.views.stream_answer_text", side_effect=broken_stream):
+            response = self.client.post(
+                reverse("api_chat_stream"),
+                data=json.dumps({"message": "When is checkout?"}),
+                content_type="application/json",
+            )
+            events = _sse_events(response)
+
+        self.assertEqual(events[-1]["type"], "error")
+        self.assertIn("Something went wrong", events[-1]["message"])
+        self.assertNotIn("provider exploded", json.dumps(events))
+        # The user turn is kept; no assistant turn is invented for a failed stream.
+        self.assertEqual(
+            list(Message.objects.values_list("role", flat=True)), ["user"]
+        )
+
 
 class TurnHistoryTests(TestCase):
     def test_history_pairs_questions_with_answers(self):
@@ -1155,6 +1288,8 @@ class InboxSerializerShape(SimpleTestCase):
 
 class AdminInboxViews(TestCase):
     def setUp(self):
+        from auth import local
+
         self.staff = get_user_model().objects.create_user(
             username="staff@example.com", email="staff@example.com", password="x" * 10,
             is_staff=True,
@@ -1163,13 +1298,20 @@ class AdminInboxViews(TestCase):
             username="guest@example.com", email="guest@example.com", password="x" * 10,
             is_staff=False,
         )
+        # The /api/admin/inbox* views are DRF with JWT-only auth (no
+        # SessionAuthentication), so a session from force_login is ignored.
+        self.staff_token = local.issue_session(self.staff).access_token
+
+    def _staff(self):
+        return {"HTTP_AUTHORIZATION": f"Bearer {self.staff_token}"}
 
     def test_reply_persists(self):
         conversation = Conversation.objects.create(title="Riya", channel="WhatsApp")
-        self.client.force_login(self.staff)
 
         reply = self.client.post(
-            f"/api/admin/inbox/{conversation.id}/replies", {"content": "We'll call you"}
+            f"/api/admin/inbox/{conversation.id}/replies",
+            {"content": "We'll call you"},
+            **self._staff(),
         )
         self.assertEqual(reply.status_code, 201, reply.content)
 
@@ -1179,6 +1321,30 @@ class AdminInboxViews(TestCase):
 
         conversation.refresh_from_db()
         self.assertEqual(conversation.messages.get().content, "We'll call you")
+
+    def test_reply_rises_thread_to_top_of_inbox(self):
+        # C9: the inbox list is ordered on Conversation.updated_at, which only
+        # moves when the row itself is saved — creating the reply message does
+        # not touch it, so a replied thread never rose to the top.
+        older = Conversation.objects.create(title="Riya")
+        newer = Conversation.objects.create(title="Priya")
+        Message.objects.create(conversation=older, role="user", content="q")
+        Message.objects.create(conversation=newer, role="user", content="q")
+        Conversation.objects.filter(pk=older.pk).update(
+            updated_at=timezone.now() - timedelta(hours=1)
+        )
+
+        reply = self.client.post(
+            f"/api/admin/inbox/{older.id}/replies",
+            {"content": "We'll call you"},
+            **self._staff(),
+        )
+        self.assertEqual(reply.status_code, 201, reply.content)
+
+        listed = self.client.get("/api/admin/inbox", **self._staff())
+        self.assertEqual(
+            [row["id"] for row in listed.json()], [str(older.pk), str(newer.pk)]
+        )
 
     def test_admin_events_refreshes_when_new_message_arrives(self):
         self.client.force_login(self.staff)
@@ -1217,26 +1383,38 @@ class AdminInboxViews(TestCase):
     def test_inbox_search_and_channel_filter(self):
         Conversation.objects.create(title="Website guest", channel="Website")
         Conversation.objects.create(title="WhatsApp guest", channel="WhatsApp")
-        self.client.force_login(self.staff)
 
-        by_channel = self.client.get("/api/admin/inbox", {"channel": "WhatsApp"}).json()
+        by_channel = self.client.get(
+            "/api/admin/inbox", {"channel": "WhatsApp"}, **self._staff()
+        ).json()
         self.assertEqual([row["title"] for row in by_channel], ["WhatsApp guest"])
 
-        by_query = self.client.get("/api/admin/inbox", {"q": "Website"}).json()
+        by_query = self.client.get(
+            "/api/admin/inbox", {"q": "Website"}, **self._staff()
+        ).json()
         self.assertEqual([row["title"] for row in by_query], ["Website guest"])
 
     def test_list_rows_carry_snippet_without_extra_queries(self):
         conversation = Conversation.objects.create(title="Riya")
         Message.objects.create(conversation=conversation, role="user", content="Hello there")
         Message.objects.create(conversation=conversation, role="assistant", content="Hi")
-        self.client.force_login(self.staff)
+        # A second row: an N+1 would add a query per conversation and break
+        # the count below.
+        other = Conversation.objects.create(title="Sam")
+        Message.objects.create(conversation=other, role="user", content="Other thread")
 
-        with self.assertNumQueries(1):
-            rows = self.client.get("/api/admin/inbox").json()
+        # 3 = JWT middleware resolves the staff user (1) + DRF re-authenticates
+        # (2) + one list query whose select_related/subquery annotations avoid
+        # an N+1 (C15).
+        with self.assertNumQueries(3):
+            rows = self.client.get("/api/admin/inbox", **self._staff()).json()
 
-        self.assertEqual(rows[0]["snippet"], "Hi")
-        self.assertEqual(rows[0]["contact_name"], "Riya")
-        self.assertIsNotNone(rows[0]["last_message_at"])
+        self.assertEqual(len(rows), 2)
+        by_title = {row["title"]: row for row in rows}
+        self.assertEqual(set(by_title), {"Riya", "Sam"})
+        self.assertEqual(by_title["Riya"]["snippet"], "Hi")
+        self.assertEqual(by_title["Riya"]["contact_name"], "Riya")
+        self.assertIsNotNone(by_title["Riya"]["last_message_at"])
 
     def test_email_falls_back_to_account_email(self):
         user = get_user_model().objects.create_user(username="jane", email="jane@example.com")
@@ -1249,3 +1427,51 @@ class AdminInboxViews(TestCase):
         blank = Conversation.objects.create(title="Guest")
         blank.last_message_content = ""
         self.assertEqual(InboxMessageSerializer(blank).data["email"], "")
+
+
+class ConcurrentRateLimitTests(TransactionTestCase):
+    """S6: the per-identity cap must survive a parallel burst on one thread.
+
+    The count and the insert share one transaction holding a row lock on the
+    conversation; without it both requests read quota-1 and both slip through.
+    """
+
+    def test_parallel_requests_share_the_last_slot(self):
+        from auth import local
+
+        user = get_user_model().objects.create_user(
+            username="burst", email="burst@example.com"
+        )
+        conversation = Conversation.objects.create(user=user, title="Burst")
+        for _ in range(views.RATE_LIMIT_PER_MINUTE - 1):
+            Message.objects.create(
+                conversation=conversation, role="user", content="old"
+            )
+
+        token = local.issue_session(user).access_token
+        barrier = threading.Barrier(2)
+        results = []
+
+        def send():
+            try:
+                client = Client()
+                barrier.wait(timeout=10)
+                response = client.post(
+                    reverse("api_chat"),
+                    data=json.dumps(
+                        {"message": "hi", "conversation_id": conversation.pk}
+                    ),
+                    content_type="application/json",
+                    HTTP_AUTHORIZATION=f"Bearer {token}",
+                )
+                results.append(response.status_code)
+            finally:
+                connections.close_all()
+
+        threads = [threading.Thread(target=send) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=30)
+
+        self.assertEqual(sorted(results), [200, 429], results)

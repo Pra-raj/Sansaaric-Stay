@@ -35,7 +35,8 @@ FIELD_ERRORS = {"type": "object", "additionalProperties": {}}
 
 def visible_booking_or_404(booking_id, user) -> Booking:
     booking = get_object_or_404(
-        Booking.objects.select_related("room", "room__hotel"), pk=booking_id
+        Booking.objects.select_related("room", "room__hotel", "room__hotel__location"),
+        pk=booking_id
     )
     if not user or not user.is_authenticated:
         raise NotFound()
@@ -71,7 +72,9 @@ class BookingListView(APIView):
     def get(self, request):
         if not request.user.is_authenticated:
             raise NotAuthenticated()
-        queryset = Booking.objects.select_related("room", "room__hotel")
+        queryset = Booking.objects.select_related(
+            "room", "room__hotel", "room__hotel__location"
+        )
         if not request.user.is_staff:
             queryset = queryset.filter(user=request.user)
         return paginated_response(queryset, request, self, BookingSummarySerializer)

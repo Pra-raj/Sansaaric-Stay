@@ -1,12 +1,26 @@
 import type { Hotel } from "@/types";
 import Link from "next/link";
+import { getSeedMedia } from "@/lib/seed-media";
 
 export function VideoCard({ hotel }: { hotel: Hotel }) {
+  const media = getSeedMedia(hotel.name);
   return (
     <section className="relative flex h-[100dvh] w-full snap-start items-end justify-center bg-gradient-to-b from-brand-900 via-brand-600 to-brand-400 md:h-[80vh] md:rounded-card">
-      <div className="absolute inset-0  flex items-center justify-center text-white/30">
-        <span className="text-sm">[ video placeholder — {hotel.name} ]</span>
-      </div>
+      {media?.video ? (
+        <video
+          src={media.video}
+          poster={media.images[0]}
+          autoPlay
+          muted
+          loop
+          playsInline
+          className="absolute inset-0 h-full w-full object-cover md:rounded-card"
+        />
+      ) : (
+        <div className="absolute inset-0  flex items-center justify-center text-white/30">
+          <span className="text-sm">[ video placeholder — {hotel.name} ]</span>
+        </div>
+      )}
 
       <div className="absolute right-3 top-1/2 flex -translate-y-1/2 flex-col items-center gap-5 text-white">
         <ActionButton icon="♥" label="Like" />

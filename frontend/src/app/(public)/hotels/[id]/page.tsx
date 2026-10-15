@@ -3,6 +3,8 @@ import { notFound } from "next/navigation";
 import { Badge } from "@/components/ui/Badge";
 import { HotelBookingAside } from "@/components/booking/HotelBookingAside";
 import { getHotelById, getHotelReviews } from "@/lib/api-client";
+import { getSeedMedia } from "@/lib/seed-media";
+import { HotelGallery } from "@/components/hotel/HotelGallery";
 
 export async function generateMetadata({
   params,
@@ -32,6 +34,7 @@ export default async function HotelDetailPage({
   const hotel = await getHotelById(id);
   if (!hotel) notFound();
   const reviews = await getHotelReviews(hotel.id);
+  const media = getSeedMedia(hotel.name);
 
   const jsonLd = {
     "@context": "https://schema.org",
@@ -52,21 +55,27 @@ export default async function HotelDetailPage({
         }}
       />
       <div className="grid grid-cols-1 gap-8 lg:grid-cols-[1fr_360px]">
-        {/* Left: photo/video gallery placeholder + info */}
+        {/* Left: photo/video gallery + info */}
         <div className="space-y-6">
-          <div className="flex aspect-video items-center justify-center rounded-card border border-brand-500/20 bg-gradient-to-b from-brand-800 via-brand-600 to-brand-500 text-white/60 shadow-xl">
-            [ photo &amp; video gallery — images load from the backend ]
-          </div>
-          <div className="flex gap-2 overflow-x-auto pb-1">
-            {[1, 2, 3, 4].map((n) => (
-              <div
-                key={n}
-                className="flex h-16 w-24 shrink-0 items-center justify-center rounded-lg border border-brand-500/20 bg-brand-100 text-[10px] text-brand-600 shadow-sm"
-              >
-                photo {n}
+          {media ? (
+            <HotelGallery media={media} name={hotel.name} />
+          ) : (
+            <>
+              <div className="flex aspect-video items-center justify-center rounded-card border border-brand-500/20 bg-gradient-to-b from-brand-800 via-brand-600 to-brand-500 text-white/60 shadow-xl">
+                [ photo &amp; video gallery — images load from the backend ]
               </div>
-            ))}
-          </div>
+              <div className="flex gap-2 overflow-x-auto pb-1">
+                {[1, 2, 3, 4].map((n) => (
+                  <div
+                    key={n}
+                    className="flex h-16 w-24 shrink-0 items-center justify-center rounded-lg border border-brand-500/20 bg-brand-100 text-[10px] text-brand-600 shadow-sm"
+                  >
+                    photo {n}
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
 
           <div>
             <h1 className="text-2xl font-bold">{hotel.name}</h1>

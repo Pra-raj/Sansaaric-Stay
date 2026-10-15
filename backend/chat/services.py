@@ -4,6 +4,7 @@ reformulate (only with history) -> embed -> hybrid (vector + FTS) -> RRF ->
 Cohere rerank -> Groq answer with numbered sources -> (answer, citations).
 """
 
+import logging
 import os
 import threading
 import time
@@ -18,6 +19,8 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from pgvector.django import CosineDistance
 
 from document_ingestion.ingestion.embedding import embed_texts
+
+logger = logging.getLogger(__name__)
 
 K = 10                     # candidates per retrieval path
 RRF_K = 60                 # fusion constant
@@ -55,13 +58,20 @@ Follow-up question: {question}
 
 Standalone question:"""
 
-SANSAARIC_SYSTEM_MESSAGE = """You are the reservations assistant for Sansaaric Stay, a
-Nepali travel and booking agency that connects travellers with hand-picked hotels,
+SANSAARIC_SYSTEM_MESSAGE = """You are Sansaaric, the reservations concierge for Sansaaric
+Stay, a Nepali travel and booking agency that connects travellers with hand-picked hotels,
 homestays, and resorts across Nepal.
 
 You help guests with properties and stays, rates and meal plans, booking, deposits,
 cancellations and refunds, destinations in Nepal, and the agency's policies and contact
 details. Always respond in English, in a warm, concise, professional travel-concierge tone.
+Mirror the guest's level of formality; never sound like you are reading from documents.
+
+Before answering, briefly acknowledge the guest's question in your own words so the reply
+feels like a conversation ("Great question —", "Good news:", "For that stay,"), then give
+the facts directly. Where it genuinely helps, end with one natural next step or a single
+clarifying question (which stay? what dates? how many guests?) instead of trailing into
+more facts.
 
 When a suggestion or a current offer genuinely helps and is supported by the provided
 context, mention it. Never invent properties, rates, discounts, availability, or policies.
@@ -70,14 +80,22 @@ If the question is outside the agency's services (flights, visas, non-Nepal trav
 reply with exactly one short sentence: "I can only help with hotels, homestays, and resorts
 in Nepal that are bookable through Sansaaric Stay." Then stop."""
 
-ANSWER_PROMPT = """Answer the question using ONLY the context provided below.
+ANSWER_PROMPT = """Answer the question using ONLY the context provided below, but never
+sound like you are reading from documents. Speak as a warm, knowledgeable concierge having
+a one-on-one conversation: direct, conversational, short.
 
-Answer as completely as the context allows, even when it is partial. If the
-context supports part of the answer, give that part and clearly note what the
-context does not confirm. Only use the no-info reply when the context contains
-nothing relevant to the question, and then use it verbatim: "I'm sorry, I'm
-unable to answer that question right now. Please contact our team at +977 1 456
-7890 or email reservations@sansaaric.com."
+Structure your reply like this:
+1. A one-line acknowledgment that picks up the guest's own words ("Sure —", "For that
+   stay,", "Good news on the meal plans:").
+2. The answer itself, as completely as the context allows. If the context supports only
+   part of the answer, give that part and clearly note what the context does not confirm.
+3. End with one short, natural move: when the relevant detail is missing or ambiguous
+   (which stay, what dates, how many guests), ask ONE clarifying question instead of
+   guessing. When the answer is complete, offer a natural next step or stop cleanly.
+
+Only use the no-info reply when the context contains nothing relevant to the question,
+and then use it verbatim: "I'm sorry, I'm unable to answer that question right now.
+Please contact our team at +977 1 456 7890 or email reservations@sansaaric.com."
 
 When the user asks for "a table", "a list", a comparison, or a summary, present
 it as a short dash list or a side-by-side plain-text comparison. Never refuse
@@ -105,8 +123,9 @@ TRANSIENT_HINTS = (
 )
 
 NO_DOCUMENTS_MESSAGE = (
-    "No documents have been trained yet. Please upload and train documents "
-    "in the admin dashboard first."
+    "I'd love to help, but I don't have information about our stays and "
+    "services yet. Please contact our team at +977 1 456 7890 or email "
+    "reservations@sansaaric.com."
 )
 
 NO_INFO_PREFIX = "I'm sorry, I'm unable to answer that question right now."
@@ -151,13 +170,27 @@ def extract_text(content):
     return str(content)
 
 
+TRANSIENT_STATUS_CODES = {429, 502, 503, 504}
+
+
 def is_transient_error(error):
+    # Provider SDKs attach an HTTP status when they have one; prefer it over
+    # string matching so a message that merely cites "429" isn't misclassified.
+    status = getattr(error, "status_code", None)
+    if isinstance(status, int) and status in TRANSIENT_STATUS_CODES:
+        return True
     message = str(error).lower()
     return any(hint in message for hint in TRANSIENT_HINTS)
 
 
 class ModelPool:
-    """Groq model pool: probe models once, rotate on transient failures."""
+    """Groq model pool: probe models once, rotate on transient failures.
+
+    Every call is bounded by MAX_INVOKE_ATTEMPTS so a persistently
+    failing provider can never spin an infinite retry/rotate loop.
+    """
+
+    MAX_INVOKE_ATTEMPTS = 6
 
     def __init__(self, models, api_key):
         self.models = models
@@ -210,44 +243,40 @@ class ModelPool:
             self.idx = (self.idx + 1) % len(self.instances)
         return True
 
-    def _retry_or_rotate(self, attempts, error):
-        if attempts >= 2:
-            if not self._rotate():
-                return False
-        else:
-            time.sleep(min(attempts, 3))
-        return True
-
-    def _invoke(self, fn):
-        attempts = 0
-        while True:
+    def _run(self, fn):
+        """Call fn, rotating models on transient errors, capped overall."""
+        for attempt in range(1, self.MAX_INVOKE_ATTEMPTS + 1):
             try:
                 return fn()
             except Exception as exc:
                 if not is_transient_error(exc):
                     raise
-                attempts += 1
-                if not self._retry_or_rotate(attempts, exc):
-                    raise
+                if attempt >= self.MAX_INVOKE_ATTEMPTS:
+                    break
+                if not self._rotate():
+                    time.sleep(min(attempt, 3))
+        raise RuntimeError(
+            f"Model provider still failing after {self.MAX_INVOKE_ATTEMPTS} attempts"
+        )
 
     def invoke_text(self, messages, max_tokens=None):
-        attempts = 0
-        while True:
+        for _ in range(self.MAX_INVOKE_ATTEMPTS):
             try:
-                response = self._invoke(
-                    lambda: self.current.invoke(messages, max_tokens=max_tokens)
-                )
+                text = extract_text(
+                    self._run(
+                        lambda: self.current.invoke(messages, max_tokens=max_tokens)
+                    )
+                ).strip()
             except Exception:
-                raise
-            text = extract_text(response.content).strip()
+                return None
             if text:
                 return text
-            attempts += 1
-            if attempts >= 2 and not self._rotate():
-                return None
+            if not self._rotate():
+                break
+        return None
 
     def invoke(self, messages, max_tokens=None):
-        return self._invoke(
+        return self._run(
             lambda: self.current.invoke(messages, max_tokens=max_tokens)
         )
 
@@ -260,7 +289,7 @@ class ModelPool:
         """
         emitted = False
         try:
-            stream = self._invoke(
+            stream = self._run(
                 lambda: self.current.stream(messages, max_tokens=max_tokens)
             )
             for chunk in stream:
@@ -280,6 +309,7 @@ class ModelPool:
 _pool_lock = threading.Lock()
 _pool = None
 _reranker = None
+_reranker_loaded = False
 
 
 # Process-local answer cache. Only used for history-free questions (first turn,
@@ -336,15 +366,14 @@ def get_model_pool():
 
 def get_reranker():
     """Lazy Cohere reranker; None (skip rerank) if no API key configured."""
-    global _reranker
-    if _reranker is None:
+    global _reranker, _reranker_loaded
+    if not _reranker_loaded:
         with _pool_lock:
-            if _reranker is None:
-                if not os.getenv("COHERE_API_KEY"):
-                    _reranker = False
-                else:
+            if not _reranker_loaded:
+                if os.getenv("COHERE_API_KEY"):
                     _reranker = CohereRerank(model="rerank-english-v3.0", top_n=TOP_N)
-    return _reranker or None
+                _reranker_loaded = True
+    return _reranker
 
 
 def prewarm_pipeline():
@@ -353,9 +382,9 @@ def prewarm_pipeline():
     Call early so the first user request never pays lazy model-load + probe
     latency. Safe to call repeatedly.
     """
-    from document_ingestion.ingestion.embedding import preload
+    from document_ingestion.ingestion.embedding import get_embedder
 
-    preload()
+    get_embedder()
     get_model_pool()
 
 
@@ -400,7 +429,8 @@ def vector_search(query_vector, k=K):
     from document_ingestion.models import Chunk
 
     return list(
-        Chunk.objects.annotate(distance=CosineDistance("embedding", query_vector))
+        Chunk.objects.filter(document__status="ready")
+        .annotate(distance=CosineDistance("embedding", query_vector))
         .order_by("distance")[:k]
     )
 
@@ -411,7 +441,8 @@ def keyword_search(query, k=K):
     for search_type in ("websearch", "plain"):
         try:
             ranked = (
-                Chunk.objects.annotate(
+                Chunk.objects.filter(document__status="ready")
+                .annotate(
                     rank=SearchRank(F("search_vector"), SearchQuery(query, search_type=search_type))
                 )
                 .order_by("-rank")[:k]
@@ -420,7 +451,6 @@ def keyword_search(query, k=K):
         except Exception:
             if search_type == "plain":
                 raise
-    return []
 
 
 def rrf_fuse(ranked_lists, k=RRF_K):
@@ -489,7 +519,13 @@ def retrieve(question, history):
     # thread so we reuse its single DB connection instead of opening+closing a
     # background thread connection each request (latency + Supabase pool load).
     vector_hits = vector_search(query_vector)
-    keyword_hits = keyword_search(search_query)
+    try:
+        keyword_hits = keyword_search(search_query)
+    except Exception:
+        # A full-text search failure (e.g. invalid tsquery for the query text)
+        # must not turn a chat turn into a 500. Degrade to vector-only.
+        logger.warning("Keyword search failed; falling back to vector-only", exc_info=True)
+        keyword_hits = []
     fused = rrf_fuse([vector_hits, keyword_hits])
     docs = rerank(fused, search_query)
     return search_query, docs
@@ -567,7 +603,7 @@ def answer_question(question, history):
     if not question:
         return "Please ask a question.", []
 
-    if not Chunk.objects.exists():
+    if not Chunk.objects.filter(document__status="ready").exists():
         return NO_DOCUMENTS_MESSAGE, []
 
     _, docs = retrieve(question, history)

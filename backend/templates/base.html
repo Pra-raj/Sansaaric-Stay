@@ -121,12 +121,8 @@
 <header>
   <span class="brand">RAG Chat</span>
   <nav>
-    {% if not request.user.is_staff %}
-      <a href="/">Chat</a>
-    {% endif %}
     {% if request.user.is_staff %}
-      <a href="{% url 'docadmin_chats' %}" class="{% if request.resolver_match and request.resolver_match.url_name == 'docadmin_chats' %}active{% endif %}">Inbox</a>
-      <a href="{% url 'docadmin' %}" class="{% if request.resolver_match and request.resolver_match.url_name == 'docadmin' %}active{% endif %}">Train Bot</a>
+      <a href="/admin/">Admin</a>
     {% endif %}
     {% if request.user.is_authenticated %}
       <form method="post" action="{% url 'logout' %}" style="display:inline; margin:0;">

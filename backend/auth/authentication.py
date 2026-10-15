@@ -2,11 +2,41 @@ from types import SimpleNamespace
 
 import jwt
 from django.conf import settings
+from django.contrib.auth import get_user_model
 from rest_framework import authentication, exceptions
 
+from . import local
 from .sync import sync_user
 
 _jwks_client = None
+
+
+class LocalJWTAuthentication(authentication.BaseAuthentication):
+    """Accepts the HS256 tokens minted by ``auth.local``.
+
+    Returns ``None`` for a token this class didn't sign so a Supabase (ES256)
+    token can still be accepted by ``SupabaseJWTAuthentication``.
+    """
+
+    keyword = "Bearer"
+
+    def authenticate(self, request):
+        header = authentication.get_authorization_header(request).split()
+        if not header or header[0].lower() != self.keyword.lower().encode():
+            return None
+        if len(header) != 2:
+            raise exceptions.AuthenticationFailed("Invalid authorization header")
+        token = header[1].decode()
+        claims = local.decode_access(token)
+        if claims is None:
+            return None
+        user = get_user_model().objects.filter(pk=claims["sub"], is_active=True).first()
+        if user is None:
+            raise exceptions.AuthenticationFailed("Invalid or expired token")
+        return (user, token)
+
+    def authenticate_header(self, request):
+        return self.keyword
 
 
 def _get_jwks_client():

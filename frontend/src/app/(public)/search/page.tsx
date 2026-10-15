@@ -10,9 +10,10 @@ export const metadata: Metadata = {
 export default async function SearchPage({
   searchParams,
 }: {
-  searchParams: { location?: string; q?: string };
+  searchParams: Promise<{ location?: string; q?: string }>;
 }) {
-  const initialLocation = searchParams.location ?? searchParams.q ?? "";
+  const { location, q } = await searchParams;
+  const initialLocation = location ?? q ?? "";
   const hotels = await getHotels();
 
   return (

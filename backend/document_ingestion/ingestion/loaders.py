@@ -37,7 +37,7 @@ def load_source(file_content, filename, file_type):
     if ftype in ("xlsx", "xls"):
         return TextDocument(_excel_to_text(file_content))
     if ftype == "csv":
-        return TextDocument(_csv_to_text(pd.read_csv(io.BytesIO(file_content))))
+        return TextDocument(_tabular_to_text(pd.read_csv(io.BytesIO(file_content))))
     return TextDocument(file_content.decode("utf-8", errors="replace"))
 
 
@@ -54,10 +54,6 @@ def _partition_file(partition_fn, file_content, filename, **kwargs):
             os.unlink(tmp_path)
         except OSError:
             pass
-
-
-def _csv_to_text(df):
-    return _tabular_to_text(df)
 
 
 def _excel_to_text(file_content):

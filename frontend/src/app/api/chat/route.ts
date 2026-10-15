@@ -16,6 +16,7 @@ export async function POST(request: Request): Promise<Response> {
   }
 
   const cookie = request.headers.get("cookie");
+  const authorization = request.headers.get("authorization");
   let upstream: Response;
   try {
     upstream = await fetch(`${BACKEND_URL}/api/chat`, {
@@ -23,6 +24,7 @@ export async function POST(request: Request): Promise<Response> {
       headers: {
         "Content-Type": "application/json",
         ...(cookie ? { Cookie: cookie } : {}),
+        ...(authorization ? { Authorization: authorization } : {}),
       },
       body,
       cache: "no-store",

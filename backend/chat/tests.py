@@ -3,17 +3,24 @@
 Run:  .venv/bin/python manage.py test chat
 """
 
+import datetime
 import json
+import threading
 from datetime import timedelta
 from unittest.mock import MagicMock, patch
 
-from django.test import SimpleTestCase, TestCase
+from django.contrib.auth import get_user_model
+from django.db import connections
+from django.test import Client, SimpleTestCase, TestCase, TransactionTestCase
 from django.urls import reverse
 from django.utils import timezone
 
 from langchain_core.documents import Document
 
+from document_ingestion.models import Chunk, ReferenceDocument
+
 from .models import Conversation, Message
+from .serializers import InboxEntrySerializer, InboxMessageSerializer
 from .services import (
     NO_INFO_PREFIX,
     NO_INFO_MESSAGE,
@@ -29,7 +36,7 @@ from .services import (
     rerank,
     rrf_fuse,
 )
-from . import services, views
+from . import router, services, views
 
 
 def _fake_chunk(pk, content):
@@ -155,6 +162,222 @@ class ServicesUnitTests(SimpleTestCase):
             _clear_cache()
 
 
+class RetrievalFilterTests(TestCase):
+    """Only chunks of `ready` documents are searchable (failed/re-training excluded)."""
+
+    VECTOR = [0.5] * 384
+
+    def _document(self, status, name):
+        doc = ReferenceDocument.objects.create(
+            file_name=name,
+            file_type="txt",
+            file_size=10,
+            status=status,
+        )
+        tokens = ["aaa", "bbb"] if status == "ready" else ["ccc"]
+        for index, token in enumerate(tokens, start=1):
+            Chunk.objects.create(
+                document=doc,
+                content=f"{token} content",
+                embedding=self.VECTOR,
+                chunk_index=index,
+            )
+        return doc
+
+    def test_vector_search_skips_failed_documents(self):
+        ready = self._document("ready", "guide.txt")
+        self._document("failed", "broken.txt")
+        query = self.VECTOR
+
+        hits = services.vector_search(query, k=5)
+        self.assertTrue(hits)
+        self.assertEqual({h.document_id for h in hits}, {ready.pk})
+
+    def test_answer_question_with_only_nonready_docs_returns_no_documents(self):
+        self._document("failed", "broken.txt")
+        answer, citations = services.answer_question("What time is checkout?", [])
+        self.assertEqual(answer, NO_DOCUMENTS_MESSAGE)
+        self.assertEqual(citations, [])
+
+
+class RouterTests(SimpleTestCase):
+    def test_greetings_short_only(self):
+        self.assertEqual(router.classify("hi"), router.GREETING)
+        self.assertEqual(router.classify("hello there"), router.GREETING)
+        self.assertEqual(router.classify("namaste"), router.GREETING)
+        self.assertEqual(router.classify("how are you?"), router.GREETING)
+        self.assertEqual(router.classify("k xa"), router.GREETING)
+        # A greeting that leads into a real ask must not swallow the intent.
+        self.assertEqual(
+            router.classify("Hi, I want to book a night at Sunrise Lodge"),
+            router.BOOKING,
+        )
+        self.assertEqual(router.classify("hello there"), router.GREETING)
+
+    def test_social_and_identity_intents(self):
+        self.assertEqual(router.classify("thank you so much"), router.THANKS)
+        self.assertEqual(router.classify("dhanyabad"), router.THANKS)
+        self.assertEqual(router.classify("bye"), router.FAREWELL)
+        self.assertEqual(router.classify("who are you?"), router.IDENTITY)
+        self.assertEqual(router.classify("help"), router.IDENTITY)
+
+    def test_booking_and_out_of_scope(self):
+        self.assertEqual(
+            router.classify("is the mountain lodge available for 2 nights"),
+            router.BOOKING,
+        )
+        self.assertEqual(
+            router.classify("I'd like to book a stay."), router.BOOKING
+        )
+        self.assertEqual(
+            router.classify("may I book the sunrise lodge for two nights"),
+            router.BOOKING,
+        )
+        self.assertEqual(
+            router.classify("checking in on Friday for two nights"),
+            router.BOOKING,
+        )
+        self.assertEqual(
+            router.classify("do you arrange flights to Pokhara?"),
+            router.OUT_OF_SCOPE,
+        )
+
+    def test_doc_questions_stay_rag(self):
+        for question in (
+            "What is your booking policy?",
+            "Do you need a deposit to book?",
+            "What time is check-in at the lodge?",
+            "How does the cancellation process work?",
+        ):
+            self.assertEqual(router.classify(question), router.RAG, question)
+
+    def test_rag_fallthrough(self):
+        for question in (
+            "What time is checkout?",
+            "",
+            "Is breakfast included at Sunrise Lodge?",
+            "hippopotamus",
+        ):
+            self.assertEqual(router.classify(question), router.RAG, question)
+
+    def test_concierge_reply_is_none_for_rag(self):
+        self.assertIsNone(router.concierge_reply(router.RAG))
+
+    def test_greeting_uses_conversation_name(self):
+        conv = type("FakeConv", (), {"title": "Amya"})()
+        reply = router.concierge_reply(router.GREETING, conv)
+        self.assertIn("Amya", reply)
+        self.assertIn("Sansaaric", reply)
+        anonymous = router.concierge_reply(router.GREETING)
+        self.assertNotIn("Amya", anonymous)
+
+
+class RequestLoggingMiddlewareTests(SimpleTestCase):
+    def test_cors_preflight_short_circuit_does_not_500(self):
+        # CorsMiddleware answers the preflight itself, so Session/Auth
+        # middleware inside it never run and request.user is never set.
+        response = self.client.options(
+            "/api/auth/login",
+            HTTP_ORIGIN="http://localhost:3000",
+            HTTP_ACCESS_CONTROL_REQUEST_METHOD="POST",
+        )
+        self.assertEqual(response.status_code, 200)
+
+
+class ContactCaptureTests(TestCase):
+    """api_chat must name conversations after the contact, not the question."""
+
+    def setUp(self):
+        _clear_cache()
+
+    def tearDown(self):
+        _clear_cache()
+
+    def test_anonymous_chat_titles_conversation_guest(self):
+        self.client.post(
+            reverse("api_chat"),
+            data=json.dumps({"message": "What time is checkout?", "new": True}),
+            content_type="application/json",
+        )
+        conversation = Conversation.objects.latest("pk")
+        self.assertEqual(conversation.title, "Guest")
+        self.assertEqual(conversation.email, "")
+        self.assertEqual(conversation.phone, "")
+        self.assertIsNone(conversation.user)
+
+    def test_payload_contact_info_is_stored(self):
+        self.client.post(
+            reverse("api_chat"),
+            data=json.dumps(
+                {
+                    "message": "Hi",
+                    "new": True,
+                    "name": "Jane Doe",
+                    "email": "jane@example.com",
+                    "phone": "9800000000",
+                }
+            ),
+            content_type="application/json",
+        )
+        conversation = Conversation.objects.latest("pk")
+        self.assertEqual(conversation.title, "Jane Doe")
+        self.assertEqual(conversation.email, "jane@example.com")
+        self.assertEqual(conversation.phone, "9800000000")
+
+    def test_account_details_used_when_no_payload_contact(self):
+        from django.contrib.auth.models import User
+
+        user = User.objects.create_user(
+            username="jane", email="jane@example.com", first_name="Jane"
+        )
+        self.client.force_login(user)
+        self.client.post(
+            reverse("api_chat"),
+            data=json.dumps({"message": "Hi", "new": True}),
+            content_type="application/json",
+        )
+        conversation = Conversation.objects.latest("pk")
+        self.assertEqual(conversation.user, user)
+        self.assertEqual(conversation.title, "Jane")
+        self.assertEqual(conversation.email, "jane@example.com")
+
+
+class BackfillMigrationTests(TestCase):
+    def test_question_titles_are_replaced(self):
+        import importlib
+
+        from django.apps import apps
+        from django.contrib.auth.models import User
+
+        migration = importlib.import_module("chat.migrations.0005_backfill_conversation_titles")
+
+        anon = Conversation.objects.create(
+            session_key="s", title="What time is checkout?"
+        )
+        Message.objects.create(
+            conversation=anon, role="user", content="What time is checkout?"
+        )
+
+        user = User.objects.create_user(
+            username="jane", email="jane@example.com", first_name="Jane"
+        )
+        owned = Conversation.objects.create(user=user, title="Book a room?")
+        Message.objects.create(conversation=owned, role="user", content="Book a room?")
+
+        named = Conversation.objects.create(session_key="t", title="Riya")
+        Message.objects.create(conversation=named, role="user", content="Hi")
+
+        migration.backfill_question_titles(apps, None)
+
+        anon.refresh_from_db()
+        self.assertEqual(anon.title, "Guest")
+        owned.refresh_from_db()
+        self.assertEqual(owned.title, "Jane")
+        self.assertEqual(owned.email, "jane@example.com")
+        named.refresh_from_db()
+        self.assertEqual(named.title, "Riya")
+
+
 class ChatApiTests(TestCase):
     def setUp(self):
         _clear_cache()
@@ -217,6 +440,15 @@ class ChatApiTests(TestCase):
 
     @patch("chat.views.answer_question", return_value=("A", []))
     def test_history_free_answers_use_cache(self, mock):
+        # C7 gates the cache on a non-empty corpus (so a "no documents"
+        # answer is never cached), so the test needs a ready chunk first.
+        doc = ReferenceDocument.objects.create(
+            file_name="guide.txt", file_type="txt", file_size=10, status="ready"
+        )
+        Chunk.objects.create(
+            document=doc, content="checkout is at 11",
+            embedding=[0.5] * 384, chunk_index=1,
+        )
         session_key = self._client_session_key()
         c1 = Conversation.objects.create(session_key=session_key)
         c2 = Conversation.objects.create(session_key=session_key)
@@ -292,6 +524,303 @@ class ChatApiTests(TestCase):
         blocked = self._post_chat({"message": "blocked", "conversation_id": conversation.pk})
         self.assertEqual(blocked.status_code, 429)
 
+    def test_malformed_conversation_id_is_rejected(self):
+        # C4: every one of these used to reach int()/filter() and raise 500.
+        for bad in ("abc", "-1", "0", "1.5", " "):
+            with self.subTest(conversation_id=bad):
+                self.assertEqual(
+                    self._post_chat({"message": "hi", "conversation_id": bad}).status_code,
+                    400,
+                )
+                self.assertEqual(
+                    self.client.post(
+                        reverse("api_chat_stream"),
+                        data=json.dumps({"message": "hi", "conversation_id": bad}),
+                        content_type="application/json",
+                    ).status_code,
+                    400,
+                )
+        self.assertEqual(Conversation.objects.count(), 0)
+
+    @patch("chat.views.answer_question", return_value=(NO_DOCUMENTS_MESSAGE, []))
+    def test_no_documents_answer_is_never_cached(self, _mock):
+        # C7: caching the canned empty-corpus reply would keep serving it for
+        # 30 minutes after the first document is trained.
+        response = self._post_chat({"message": "What time is checkout?"})
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNone(cached_answer("What time is checkout?"))
+
+    @patch("chat.views.answer_question", side_effect=RuntimeError("boom"))
+    def test_chat_error_carries_conversation_id(self, _mock):
+        # U14: without it the widget starts a fresh thread and strands the turn.
+        response = self._post_chat({"message": "What time is checkout?"})
+        self.assertEqual(response.status_code, 500)
+        body = response.json()
+        self.assertIsNotNone(body["conversation_id"])
+        conversation = Conversation.objects.get(pk=body["conversation_id"])
+        self.assertEqual(
+            list(conversation.messages.values_list("role", flat=True)), ["user"]
+        )
+
+
+class ChatIdentityTests(TestCase):
+    """JWT identity on plain chat views, guest-thread claiming, logout lockout."""
+
+    def setUp(self):
+        _clear_cache()
+        self.user = get_user_model().objects.create_user(
+            username="jane", email="jane@example.com", first_name="Jane"
+        )
+        from auth import local
+
+        self.token = local.issue_session(self.user).access_token
+
+    def tearDown(self):
+        _clear_cache()
+
+    def _auth_headers(self):
+        return {"HTTP_AUTHORIZATION": f"Bearer {self.token}"}
+
+    @patch("chat.views.answer_question", return_value=("A", []))
+    def test_jwt_authenticated_request_owns_new_conversation(self, _mock):
+        response = self.client.post(
+            reverse("api_chat"),
+            data=json.dumps({"message": "Hi", "new": True}),
+            content_type="application/json",
+            **self._auth_headers(),
+        )
+        self.assertEqual(response.status_code, 200)
+        conversation = Conversation.objects.get(pk=response.json()["conversation_id"])
+        self.assertEqual(conversation.user, self.user)
+        self.assertEqual(conversation.title, "Jane")
+        self.assertEqual(conversation.email, "jane@example.com")
+
+    @patch("chat.views.answer_question", return_value=("A", []))
+    def test_guest_and_login_share_one_thread_via_claim(self, _mock):
+        # Guest chats on this browser session...
+        as_guest = self.client.post(
+            reverse("api_chat"),
+            data=json.dumps({"message": "Guest hello", "new": True}),
+            content_type="application/json",
+        )
+        guest_id = as_guest.json()["conversation_id"]
+        self.assertIsNone(Conversation.objects.get(pk=guest_id).user)
+        self.assertEqual(Conversation.objects.get(pk=guest_id).title, "Guest")
+
+        # ...then the same person logs in and continues the same thread.
+        after_login = self.client.post(
+            reverse("api_chat"),
+            data=json.dumps({"message": "Signed-in follow-up", "conversation_id": guest_id}),
+            content_type="application/json",
+            **self._auth_headers(),
+        )
+        self.assertEqual(after_login.status_code, 200)
+        self.assertEqual(after_login.json()["conversation_id"], guest_id)
+
+        conversation = Conversation.objects.get(pk=guest_id)
+        self.assertEqual(conversation.user, self.user)
+        self.assertEqual(conversation.title, "Jane")
+        self.assertEqual(conversation.email, "jane@example.com")
+        self.assertEqual(conversation.session_key, "")
+
+    @patch("chat.views.answer_question", return_value=("A", []))
+    def test_cannot_claim_another_sessions_guest_thread(self, _mock):
+        other = Conversation.objects.create(session_key="someone-elses-session")
+        response = self.client.post(
+            reverse("api_chat"),
+            data=json.dumps({"message": "hi", "conversation_id": other.pk}),
+            content_type="application/json",
+            **self._auth_headers(),
+        )
+        self.assertEqual(response.status_code, 404)
+        other.refresh_from_db()
+        self.assertIsNone(other.user)
+
+    @patch("chat.views.answer_question", return_value=("A", []))
+    def test_guest_thread_hidden_from_anonymous_after_logout(self, _mock):
+        # Guest thread claimed by the account...
+        as_guest = self.client.post(
+            reverse("api_chat"),
+            data=json.dumps({"message": "Guest hello", "new": True}),
+            content_type="application/json",
+        )
+        guest_id = as_guest.json()["conversation_id"]
+        self.client.post(
+            reverse("api_chat"),
+            data=json.dumps({"message": "follow-up", "conversation_id": guest_id}),
+            content_type="application/json",
+            **self._auth_headers(),
+        )
+
+        # ...then the user logs out: the same browser cannot reach it anymore.
+        logged_out = self.client.post(
+            reverse("api_chat"),
+            data=json.dumps({"message": "who am I", "conversation_id": guest_id}),
+            content_type="application/json",
+        )
+        self.assertEqual(logged_out.status_code, 404)
+
+    @patch("chat.views.answer_question", return_value=("A", []))
+    def test_login_creates_fresh_conversation_when_no_thread_referenced(self, _mock):
+        # A logged-in user with no referenced guest thread starts fresh, and the
+        # message goes to the user-owned conversation (not the anonymous one).
+        as_guest = self.client.post(
+            reverse("api_chat"),
+            data=json.dumps({"message": "Guest hello", "new": True}),
+            content_type="application/json",
+        )
+        guest_id = as_guest.json()["conversation_id"]
+
+        response = self.client.post(
+            reverse("api_chat"),
+            data=json.dumps({"message": "new signed-in chat", "new": True}),
+            content_type="application/json",
+            **self._auth_headers(),
+        )
+        self.assertEqual(response.status_code, 200)
+        fresh_id = response.json()["conversation_id"]
+        self.assertNotEqual(fresh_id, guest_id)
+        self.assertEqual(Conversation.objects.get(pk=fresh_id).user, self.user)
+
+
+class ChatHistoryEventsTests(TestCase):
+    """GET /api/chat/history + /api/chat/events ownership and payload shape."""
+
+    def setUp(self):
+        _clear_cache()
+        self.user = get_user_model().objects.create_user(
+            username="jay", email="jay@example.com", first_name="Jay"
+        )
+        from auth import local
+
+        self.token = local.issue_session(self.user).access_token
+
+    def tearDown(self):
+        _clear_cache()
+
+    def _auth_headers(self):
+        return {"HTTP_AUTHORIZATION": f"Bearer {self.token}"}
+
+    @patch("chat.views.answer_question", return_value=("A", []))
+    def test_history_returns_generated_thread(self, _mock):
+        created = self.client.post(
+            reverse("api_chat"),
+            data=json.dumps({"message": "First question", "new": True}),
+            content_type="application/json",
+        )
+        conversation_id = created.json()["conversation_id"]
+
+        history = self.client.get(
+            reverse("api_chat_history"),
+            {"conversation_id": conversation_id},
+        )
+        self.assertEqual(history.status_code, 200, history.content)
+        body = history.json()
+        self.assertEqual(body["conversation_id"], conversation_id)
+        self.assertEqual([m["role"] for m in body["messages"]], ["user", "assistant"])
+        self.assertEqual(body["messages"][0]["content"], "First question")
+
+    @patch("chat.views.answer_question", return_value=("A", []))
+    def test_history_visible_to_claiming_account(self, _mock):
+        created = self.client.post(
+            reverse("api_chat"),
+            data=json.dumps({"message": "Guest hello", "new": True}),
+            content_type="application/json",
+        )
+        conversation_id = created.json()["conversation_id"]
+        self.client.post(
+            reverse("api_chat"),
+            data=json.dumps({"message": "follow-up", "conversation_id": conversation_id}),
+            content_type="application/json",
+            **self._auth_headers(),
+        )
+
+        history = self.client.get(
+            reverse("api_chat_history"),
+            {"conversation_id": conversation_id},
+            **self._auth_headers(),
+        )
+        self.assertEqual(history.status_code, 200, history.content)
+        self.assertEqual(history.json()["conversation_id"], conversation_id)
+
+    @patch("chat.views.answer_question", return_value=("A", []))
+    def test_history_hidden_from_anonymous_after_logout(self, _mock):
+        created = self.client.post(
+            reverse("api_chat"),
+            data=json.dumps({"message": "Guest hello", "new": True}),
+            content_type="application/json",
+        )
+        conversation_id = created.json()["conversation_id"]
+        self.client.post(
+            reverse("api_chat"),
+            data=json.dumps({"message": "follow-up", "conversation_id": conversation_id}),
+            content_type="application/json",
+            **self._auth_headers(),
+        )
+
+        logged_out = self.client.get(
+            reverse("api_chat_history"),
+            {"conversation_id": conversation_id},
+        )
+        self.assertEqual(logged_out.status_code, 404)
+
+    def test_history_refuses_another_sessions_thread(self):
+        owner = Client()
+        created = owner.post(
+            reverse("api_chat"),
+            data=json.dumps({"message": "private", "new": True}),
+            content_type="application/json",
+        )
+        conversation_id = created.json()["conversation_id"]
+
+        stranger_session = self.client.get(
+            reverse("api_chat_history"),
+            {"conversation_id": conversation_id},
+        )
+        self.assertEqual(stranger_session.status_code, 404)
+
+    def test_history_rejects_bad_ids(self):
+        self.assertEqual(
+            self.client.get(reverse("api_chat_history"), {"conversation_id": "abc"}).status_code,
+            400,
+        )
+        self.assertEqual(
+            self.client.get(reverse("api_chat_history"), {"conversation_id": "0"}).status_code,
+            400,
+        )
+
+    @patch("chat.views.answer_question", return_value=("A", []))
+    def test_events_streams_existing_messages(self, _mock):
+        created = self.client.post(
+            reverse("api_chat"),
+            data=json.dumps({"message": "One for the stream", "new": True}),
+            content_type="application/json",
+        )
+        conversation_id = created.json()["conversation_id"]
+
+        events = self.client.get(
+            reverse("api_chat_events"),
+            {"conversation_id": conversation_id, "since_id": 0},
+        )
+        self.assertEqual(events.status_code, 200)
+        self.assertIn("text/event-stream", events["Content-Type"])
+
+        first_frame = next(iter(events.streaming_content))
+        self.assertIn(b"One for the stream", first_frame)
+        self.assertIn(b'"type": "message"', first_frame)
+
+    def test_events_refuses_unknown_or_malformed(self):
+        self.assertEqual(
+            self.client.get(
+                reverse("api_chat_events"), {"conversation_id": "999999"}
+            ).status_code,
+            404,
+        )
+        self.assertEqual(
+            self.client.get(reverse("api_chat_events"), {"conversation_id": "x"}).status_code,
+            400,
+        )
+
 
 class ChatStreamTests(TestCase):
     def setUp(self):
@@ -337,12 +866,122 @@ class ChatStreamTests(TestCase):
         # Empty test DB -> no chunks -> the friendlier message, not a crash.
         response = self.client.post(
             reverse("api_chat_stream"),
-            data=json.dumps({"message": "hi?"}),
+            data=json.dumps({"message": "What time is checkout?"}),
             content_type="application/json",
         )
         events = _sse_events(response)
         self.assertEqual(events[-1]["type"], "done")
         self.assertEqual(events[-1]["answer"], NO_DOCUMENTS_MESSAGE)
+
+    def test_stream_greeting_uses_router_not_pipeline(self):
+        with patch("chat.views.retrieve", side_effect=AssertionError("unused")):
+            response = self.client.post(
+                reverse("api_chat_stream"),
+                data=json.dumps({"message": "hi"}),
+                content_type="application/json",
+            )
+        events = _sse_events(response)
+        self.assertEqual(events[-1]["type"], "done")
+        self.assertTrue(events[-1]["answer"].startswith("Hi!"))
+        self.assertEqual(events[-1]["citations"], [])
+        self.assertEqual(
+            list(Message.objects.filter(role="assistant").values_list("content", flat=True)),
+            [events[-1]["answer"]],
+        )
+
+    def test_stream_booking_intent_short_circuits(self):
+        response = self.client.post(
+            reverse("api_chat_stream"),
+            data=json.dumps({"message": "I want to book a night at Sunrise Lodge"}),
+            content_type="application/json",
+        )
+        events = _sse_events(response)
+        self.assertEqual(events[-1]["type"], "done")
+        self.assertTrue(events[-1]["answer"].startswith("Of course"))
+
+    @staticmethod
+    def _rag_context():
+        def fake_retrieve(_q, _h):
+            doc = Document(
+                page_content="content",
+                metadata={"source": "guide.txt", "chunk_pk": 1},
+            )
+            return "reformulated?", [doc]
+
+        fake_chunk = MagicMock()
+        fake_chunk.objects.exists.return_value = True
+        return fake_chunk, fake_retrieve
+
+    def test_stream_tokens_join_to_done_answer(self):
+        # C25: tokens must use the §5 `text` key and their concatenation must
+        # equal the `done` payload (and the stored answer).
+        def fake_stream(_q, _c):
+            yield "Check"
+            yield "out"
+            yield " at 11."
+
+        fake_chunk, fake_retrieve = self._rag_context()
+
+        with patch("document_ingestion.models.Chunk", fake_chunk), patch(
+            "chat.views.retrieve", side_effect=fake_retrieve
+        ), patch("chat.views.stream_answer_text", side_effect=fake_stream):
+            response = self.client.post(
+                reverse("api_chat_stream"),
+                data=json.dumps({"message": "When is checkout?"}),
+                content_type="application/json",
+            )
+            events = _sse_events(response)
+
+        tokens = [e for e in events if e["type"] == "token"]
+        done = [e for e in events if e["type"] == "done"]
+        self.assertEqual(len(done), 1)
+        self.assertEqual(
+            [t["text"] for t in tokens], ["Check", "out", " at 11."]
+        )
+        self.assertEqual(done[0]["answer"], "".join(t["text"] for t in tokens))
+        self.assertEqual(
+            list(
+                Message.objects.filter(role="assistant").values_list(
+                    "content", flat=True
+                )
+            ),
+            [done[0]["answer"]],
+        )
+
+    def test_stream_emits_terminal_error_when_generation_fails(self):
+        # C8: a mid-stream failure must end the event stream with a terminal
+        # `error`, not leave the widget waiting forever.
+        def fake_retrieve(_q, _h):
+            doc = Document(
+                page_content="content",
+                metadata={"source": "guide.txt", "chunk_pk": 1},
+            )
+            return "reformulated?", [doc]
+
+        def broken_stream(_q, _c):
+            yield "partial"
+            raise RuntimeError("provider exploded")
+
+        fake_chunk = MagicMock()
+        fake_chunk.objects.exists.return_value = True
+
+        with patch("document_ingestion.models.Chunk", fake_chunk), patch(
+            "chat.views.retrieve", side_effect=fake_retrieve
+        ), patch("chat.views.stream_answer_text", side_effect=broken_stream):
+            response = self.client.post(
+                reverse("api_chat_stream"),
+                data=json.dumps({"message": "When is checkout?"}),
+                content_type="application/json",
+            )
+            events = _sse_events(response)
+
+        self.assertEqual(events[-1]["type"], "error")
+        self.assertIn("Something went wrong", events[-1]["message"])
+        self.assertNotIn("provider exploded", json.dumps(events))
+        # The user turn is kept; no assistant turn is invented for a failed stream.
+        self.assertEqual(
+            list(Message.objects.values_list("role", flat=True)), ["user"]
+        )
 
 
 class TurnHistoryTests(TestCase):
@@ -359,151 +998,6 @@ class TurnHistoryTests(TestCase):
             [t["question"] for t in history], ["first", "third"]
         )
 
-
-class StaffInboxTests(TestCase):
-    """Staff inbox endpoints: reply, update, create, filtered list."""
-
-    def setUp(self):
-        from django.contrib.auth.models import User
-
-        self.staff = User.objects.create_user(
-            username="staff", password="x", is_staff=True
-        )
-        self.customer = User.objects.create_user(
-            username="customer", password="x", email="customer@example.com"
-        )
-        self.conversation = Conversation.objects.create(
-            user=self.customer,
-            title="Booking enquiry",
-            channel="Website",
-            email="customer@example.com",
-            phone="9812345678",
-            note="wants a mountain view",
-        )
-        Message.objects.create(
-            conversation=self.conversation, role="user", content="Hi"
-        )
-        self.client.force_login(self.staff)
-
-    def test_reply_persists_human_message(self):
-        response = self.client.post(
-            reverse("docadmin_chat_reply", args=[self.conversation.pk]),
-            data=json.dumps({"content": "Hi, I will check that for you."}),
-            content_type="application/json",
-        )
-        self.assertEqual(response.status_code, 200)
-        self.assertTrue(response.json()["ok"])
-
-        message = Message.objects.get(
-            conversation=self.conversation, content="Hi, I will check that for you."
-        )
-        self.assertEqual(message.role, "assistant")
-        self.assertTrue(message.is_human)
-        self.assertEqual(
-            Message.objects.filter(
-                conversation=self.conversation, role="assistant", is_human=True
-            ).count(),
-            1,
-        )
-
-    def test_reply_requires_staff(self):
-        self.client.force_login(self.customer)
-        response = self.client.post(
-            reverse("docadmin_chat_reply", args=[self.conversation.pk]),
-            data=json.dumps({"content": "hi"}),
-            content_type="application/json",
-        )
-        self.assertEqual(response.status_code, 302)  # redirected to login
-
-    def test_reply_validates_empty_content(self):
-        response = self.client.post(
-            reverse("docadmin_chat_reply", args=[self.conversation.pk]),
-            data=json.dumps({"content": "   "}),
-            content_type="application/json",
-        )
-        self.assertEqual(response.status_code, 400)
-        self.assertEqual(Message.objects.filter(is_human=True).count(), 0)
-
-    def test_update_partial_fields_and_toggle(self):
-        response = self.client.post(
-            reverse("docadmin_chat_update", args=[self.conversation.pk]),
-            data=json.dumps(
-                {"channel": "WhatsApp", "note": "subject updated", "is_human": True}
-            ),
-            content_type="application/json",
-        )
-        self.assertEqual(response.status_code, 200)
-        data = response.json()
-        self.assertTrue(data["ok"])
-        self.assertEqual(data["contact"]["channel"], "WhatsApp")
-        self.assertEqual(data["contact"]["note"], "subject updated")
-        self.assertTrue(data["contact"]["is_human"])
-
-        self.conversation.refresh_from_db()
-        self.assertEqual(self.conversation.channel, "WhatsApp")
-        self.assertTrue(self.conversation.is_human)
-
-    def test_update_invalid_channel_rejected(self):
-        response = self.client.post(
-            reverse("docadmin_chat_update", args=[self.conversation.pk]),
-            data=json.dumps({"channel": "Telegram"}),
-            content_type="application/json",
-        )
-        self.assertEqual(response.status_code, 400)
-
-    def test_create_conversation_with_channel_and_contact(self):
-        response = self.client.post(
-            reverse("docadmin_chat_create"),
-            data=json.dumps(
-                {
-                    "name": "Riya Kapoor",
-                    "channel": "Instagram",
-                    "email": "riya@example.com",
-                    "phone": "9822334455",
-                }
-            ),
-            content_type="application/json",
-        )
-        self.assertEqual(response.status_code, 200)
-        data = response.json()
-        self.assertTrue(data["ok"])
-
-        created = Conversation.objects.get(pk=data["conversation_id"])
-        self.assertEqual(created.title, "Riya Kapoor")
-        self.assertEqual(created.channel, "Instagram")
-        self.assertEqual(created.email, "riya@example.com")
-        self.assertEqual(created.phone, "9822334455")
-        self.assertFalse(created.is_human)
-
-    def test_list_filters_by_channel(self):
-        other = Conversation.objects.create(
-            session_key="anon", title="Other", channel="Facebook"
-        )
-        response = self.client.get(
-            reverse("docadmin_chats"), {"channel": "Facebook"}
-        )
-        self.assertEqual(response.status_code, 200)
-        pks = [c.pk for c in response.context["conversations"]]
-        self.assertIn(other.pk, pks)
-        self.assertNotIn(self.conversation.pk, pks)
-
-    def test_list_searches_by_phone(self):
-        response = self.client.get(reverse("docadmin_chats"), {"q": "981234"})
-        self.assertEqual(response.status_code, 200)
-        pks = [c.pk for c in response.context["conversations"]]
-        self.assertIn(self.conversation.pk, pks)
-
-    def test_list_searches_by_customer_email(self):
-        response = self.client.get(reverse("docadmin_chats"), {"q": "customer@exa"})
-        self.assertEqual(response.status_code, 200)
-        pks = [c.pk for c in response.context["conversations"]]
-        self.assertIn(self.conversation.pk, pks)
-
-    def test_list_partial_returns_list_template(self):
-        response = self.client.get(reverse("docadmin_chats"), {"partial": "1"})
-        self.assertEqual(response.status_code, 200)
-        render_templates = [t.name for t in response.templates]
-        self.assertIn("documents/docadmin_chats_list.html", render_templates)
 
 class AdminRegistrationTests(TestCase):
     """Chat models registered in the Django admin.
@@ -560,11 +1054,6 @@ class AdminRegistrationTests(TestCase):
         self.assertEqual(row.message_count, 1)
         self.assertEqual(row.last_message, "Here are our rates.")
 
-    def test_conversation_changelist_links_to_inbox_thread(self):
-        response = self.client.get(reverse("admin:chat_conversation_changelist"))
-        expected = reverse("docadmin_chat_thread", args=[self.conversation.pk])
-        self.assertContains(response, f'href="{expected}"')
-
     def test_conversation_changelist_search_by_title(self):
         response = self.client.get(
             reverse("admin:chat_conversation_changelist"), {"q": "Booking enquiry"}
@@ -605,7 +1094,6 @@ class AdminRegistrationTests(TestCase):
                 "email": "customer@example.com",
                 "phone": "",
                 "note": "wants a mountain view",
-                "is_human": "on",
                 "messages-TOTAL_FORMS": "1",
                 "messages-INITIAL_FORMS": "1",
                 "messages-MIN_NUM_FORMS": "0",
@@ -616,7 +1104,6 @@ class AdminRegistrationTests(TestCase):
         self.assertEqual(response.status_code, 302)
         self.conversation.refresh_from_db()
         self.assertEqual(self.conversation.title, "Booking enquiry (edited)")
-        self.assertTrue(self.conversation.is_human)
         # The transcript is untouched by the admin edit.
         self.assertEqual(self.conversation.messages.count(), 1)
         self.message.refresh_from_db()
@@ -764,3 +1251,227 @@ class AdminHelperTests(SimpleTestCase):
         conversation_admin = admin.site._registry[Conversation]
         stub = type("S", (), {"last_message": None})()
         self.assertEqual(conversation_admin.last_message(stub), "—")
+
+
+# --- Moved from admin_api/tests.py (D10). Auth assertions are repaired in Phase T (C1). ---
+
+
+def make_message(role="assistant", content="hi"):
+    return Message(
+        id=7,
+        role=role,
+        content=content,
+        citations=[{"title": "House Rules"}],
+        created_at=datetime.datetime(2026, 1, 2, 3, 4, tzinfo=datetime.timezone.utc),
+    )
+
+
+class InboxSerializerShape(SimpleTestCase):
+    """Pinned to the exact keys types/index.ts declares."""
+
+    def test_entry_uses_from_body_sent_at(self):
+        data = InboxEntrySerializer(make_message()).data
+        self.assertEqual(set(data), {"id", "from", "body", "sentAt", "citations"})
+        self.assertEqual(data["id"], 7)
+        self.assertEqual(data["body"], "hi")
+        self.assertEqual(data["citations"], [{"title": "House Rules"}])
+
+    def test_entry_from_reflects_who_wrote_it(self):
+        for role, expected in [
+            ("user", "guest"),
+            ("assistant", "bot"),
+        ]:
+            with self.subTest(role=role):
+                data = InboxEntrySerializer(make_message(role)).data
+                self.assertEqual(data["from"], expected)
+
+
+class AdminInboxViews(TestCase):
+    def setUp(self):
+        from auth import local
+
+        self.staff = get_user_model().objects.create_user(
+            username="staff@example.com", email="staff@example.com", password="x" * 10,
+            is_staff=True,
+        )
+        self.guest = get_user_model().objects.create_user(
+            username="guest@example.com", email="guest@example.com", password="x" * 10,
+            is_staff=False,
+        )
+        # The /api/admin/inbox* views are DRF with JWT-only auth (no
+        # SessionAuthentication), so a session from force_login is ignored.
+        self.staff_token = local.issue_session(self.staff).access_token
+
+    def _staff(self):
+        return {"HTTP_AUTHORIZATION": f"Bearer {self.staff_token}"}
+
+    def test_reply_persists(self):
+        conversation = Conversation.objects.create(title="Riya", channel="WhatsApp")
+
+        reply = self.client.post(
+            f"/api/admin/inbox/{conversation.id}/replies",
+            {"content": "We'll call you"},
+            **self._staff(),
+        )
+        self.assertEqual(reply.status_code, 201, reply.content)
+
+        body = reply.json()
+        self.assertEqual(body["entries"][0]["from"], "bot")
+        self.assertEqual(body["entries"][0]["body"], "We'll call you")
+
+        conversation.refresh_from_db()
+        self.assertEqual(conversation.messages.get().content, "We'll call you")
+
+    def test_reply_rises_thread_to_top_of_inbox(self):
+        # C9: the inbox list is ordered on Conversation.updated_at, which only
+        # moves when the row itself is saved — creating the reply message does
+        # not touch it, so a replied thread never rose to the top.
+        older = Conversation.objects.create(title="Riya")
+        newer = Conversation.objects.create(title="Priya")
+        Message.objects.create(conversation=older, role="user", content="q")
+        Message.objects.create(conversation=newer, role="user", content="q")
+        Conversation.objects.filter(pk=older.pk).update(
+            updated_at=timezone.now() - timedelta(hours=1)
+        )
+
+        reply = self.client.post(
+            f"/api/admin/inbox/{older.id}/replies",
+            {"content": "We'll call you"},
+            **self._staff(),
+        )
+        self.assertEqual(reply.status_code, 201, reply.content)
+
+        listed = self.client.get("/api/admin/inbox", **self._staff())
+        self.assertEqual(
+            [row["id"] for row in listed.json()], [str(older.pk), str(newer.pk)]
+        )
+
+    def test_admin_events_refreshes_when_new_message_arrives(self):
+        self.client.force_login(self.staff)
+        conversation = Conversation.objects.create(title="Riya")
+        Message.objects.create(conversation=conversation, role="user", content="before")
+
+        # Pause the poll loop's sleep just long enough to post a new message
+        # mid-stream, so the next tick observes the change (deterministic).
+        posted = []
+
+        def sleepy(_secs):
+            if not posted:
+                posted.append(True)
+                Message.objects.create(
+                    conversation=conversation, role="user", content="after"
+                )
+
+        with patch("time.sleep", side_effect=sleepy):
+            response = self.client.get("/api/admin/inbox/events")
+            self.assertEqual(response.status_code, 200)
+            events = _sse_events(response)
+
+        self.assertEqual(events[0]["type"], "refresh")
+        self.assertEqual(events[0]["since"], Message.objects.latest("pk").created_at.isoformat())
+        self.assertEqual(events[-1]["type"], "done")
+
+    def test_admin_events_forbidden_for_non_staff(self):
+        self.client.force_login(self.guest)
+        response = self.client.get("/api/admin/inbox/events")
+        self.assertEqual(response.status_code, 403)
+
+    def test_admin_events_anonymous_forbidden(self):
+        response = self.client.get("/api/admin/inbox/events")
+        self.assertEqual(response.status_code, 403)
+
+    def test_inbox_search_and_channel_filter(self):
+        Conversation.objects.create(title="Website guest", channel="Website")
+        Conversation.objects.create(title="WhatsApp guest", channel="WhatsApp")
+
+        by_channel = self.client.get(
+            "/api/admin/inbox", {"channel": "WhatsApp"}, **self._staff()
+        ).json()
+        self.assertEqual([row["title"] for row in by_channel], ["WhatsApp guest"])
+
+        by_query = self.client.get(
+            "/api/admin/inbox", {"q": "Website"}, **self._staff()
+        ).json()
+        self.assertEqual([row["title"] for row in by_query], ["Website guest"])
+
+    def test_list_rows_carry_snippet_without_extra_queries(self):
+        conversation = Conversation.objects.create(title="Riya")
+        Message.objects.create(conversation=conversation, role="user", content="Hello there")
+        Message.objects.create(conversation=conversation, role="assistant", content="Hi")
+        # A second row: an N+1 would add a query per conversation and break
+        # the count below.
+        other = Conversation.objects.create(title="Sam")
+        Message.objects.create(conversation=other, role="user", content="Other thread")
+
+        # 3 = JWT middleware resolves the staff user (1) + DRF re-authenticates
+        # (2) + one list query whose select_related/subquery annotations avoid
+        # an N+1 (C15).
+        with self.assertNumQueries(3):
+            rows = self.client.get("/api/admin/inbox", **self._staff()).json()
+
+        self.assertEqual(len(rows), 2)
+        by_title = {row["title"]: row for row in rows}
+        self.assertEqual(set(by_title), {"Riya", "Sam"})
+        self.assertEqual(by_title["Riya"]["snippet"], "Hi")
+        self.assertEqual(by_title["Riya"]["contact_name"], "Riya")
+        self.assertIsNotNone(by_title["Riya"]["last_message_at"])
+
+    def test_email_falls_back_to_account_email(self):
+        user = get_user_model().objects.create_user(username="jane", email="jane@example.com")
+        conversation = Conversation.objects.create(user=user, title="Jane Doe")
+        conversation.last_message_content = ""
+
+        data = InboxMessageSerializer(conversation).data
+        self.assertEqual(data["email"], "jane@example.com")
+
+        blank = Conversation.objects.create(title="Guest")
+        blank.last_message_content = ""
+        self.assertEqual(InboxMessageSerializer(blank).data["email"], "")
+
+
+class ConcurrentRateLimitTests(TransactionTestCase):
+    """S6: the per-identity cap must survive a parallel burst on one thread.
+
+    The count and the insert share one transaction holding a row lock on the
+    conversation; without it both requests read quota-1 and both slip through.
+    """
+
+    def test_parallel_requests_share_the_last_slot(self):
+        from auth import local
+
+        user = get_user_model().objects.create_user(
+            username="burst", email="burst@example.com"
+        )
+        conversation = Conversation.objects.create(user=user, title="Burst")
+        for _ in range(views.RATE_LIMIT_PER_MINUTE - 1):
+            Message.objects.create(
+                conversation=conversation, role="user", content="old"
+            )
+
+        token = local.issue_session(user).access_token
+        barrier = threading.Barrier(2)
+        results = []
+
+        def send():
+            try:
+                client = Client()
+                barrier.wait(timeout=10)
+                response = client.post(
+                    reverse("api_chat"),
+                    data=json.dumps(
+                        {"message": "hi", "conversation_id": conversation.pk}
+                    ),
+                    content_type="application/json",
+                    HTTP_AUTHORIZATION=f"Bearer {token}",
+                )
+                results.append(response.status_code)
+            finally:
+                connections.close_all()
+
+        threads = [threading.Thread(target=send) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=30)
+
+        self.assertEqual(sorted(results), [200, 429], results)

@@ -1,8 +1,10 @@
-import { dummyHotels } from "@/lib/placeholder-data";
+import { getRecommendations } from "@/lib/api-client";
 import RecommendationCardItem from "../search/RecommendationCard";
 import Link from "next/link";
 
-function Recommendation() {
+async function Recommendation() {
+  const hotels = await getRecommendations(4);
+
   return (
     <section className="bg-surface py-12">
       <div className="mx-auto max-w-7xl px-4">
@@ -21,7 +23,7 @@ function Recommendation() {
           </Link>
         </div>
         <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-4">
-          {dummyHotels.map((hotel) => (
+          {hotels.map((hotel) => (
             <RecommendationCardItem key={hotel.id} hotel={hotel} />
           ))}
         </div>

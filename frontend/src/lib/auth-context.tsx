@@ -8,19 +8,22 @@ import {
   useState,
   createContext,
 } from "react";
-import { loadStoredUser } from "./auth";
 import * as auth from "./auth";
+import type { UserRole } from "@/types";
 
 export interface AuthUser {
   name: string;
   email: string;
   initials: string;
   photoUrl?: string;
+  /** Missing on sessions stored before roles existed — treat as "guest". */
+  role?: UserRole;
 }
 
 interface AuthContextValue {
   isLoggedIn: boolean;
   isLoading: boolean;
+  isAdmin: boolean;
   user: AuthUser | null;
   login: (email: string, password: string) => Promise<void>;
   signup: (name: string, email: string, password: string) => Promise<void>;
@@ -34,39 +37,52 @@ export default function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<AuthUser | null>(null);
   const [isLoading, setIsLoading] = useState(true);
 
+  // fetchCurrentUser rejects without hitting the network when there is no token,
+  // so anonymous visitors cost no request. Every state update below happens in a
+  // promise callback, never synchronously in the effect.
   useEffect(() => {
-    const id = window.setTimeout(() => {
-      setUser(loadStoredUser());
-      setIsLoading(false);
-    }, 0);
-    return () => window.clearTimeout(id);
+    auth
+      .fetchCurrentUser()
+      .then((fresh) => {
+        // Re-read from the server so a revoked staff flag takes effect without
+        // forcing the user to sign out.
+        setUser(fresh);
+      })
+      .catch((err: unknown) => {
+        // Only an explicit auth rejection (401/403) means the tokens are dead.
+        // A network blip or a 5xx should NOT log the user out mid-session.
+        const status = err instanceof auth.AuthError ? err.status : undefined;
+        if (status === 401 || status === 403) auth.clearSession();
+        setUser(null);
+      })
+      .finally(() => setIsLoading(false));
   }, []);
 
   const value = useMemo<AuthContextValue>(
     () => ({
       isLoggedIn: user !== null,
       isLoading,
+      isAdmin: user?.role === "admin",
       user,
       login: async (email: string, password: string) => {
-        const result = await auth.login(email, password);
-        auth.storeSession(result);
-        setUser(result.user);
+        await auth.signIn(email, password);
+        const fresh = await auth.fetchCurrentUser();
+        setUser(fresh);
       },
       signup: async (name, email, password) => {
-        const result = await auth.signup(name, email, password);
-        auth.storeSession(result);
-        setUser(result.user);
+        await auth.signUp(name, email, password);
+        const fresh = await auth.fetchCurrentUser();
+        setUser(fresh);
       },
       logOut: () => {
+        void auth.revokeSession();
         auth.clearSession();
         setUser(null);
       },
       updateProfile: (patch) => {
         setUser((prev) => {
           if (!prev) return prev;
-          const next = { ...prev, ...patch };
-          auth.updateStoredUser(next);
-          return next;
+          return { ...prev, ...patch };
         });
       },
     }),

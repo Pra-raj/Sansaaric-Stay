@@ -7,7 +7,6 @@ import { useAuth } from "@/lib/auth-context";
 import { useAuthModal } from "@/lib/auth-modal-context";
 import {
   getPasswordError,
-  getPasswordLengthError,
   isValidEmail,
   MIN_PASSWORD_LEN,
 } from "@/lib/validation";
@@ -58,11 +57,6 @@ export function AuthCardContent() {
     e.preventDefault();
     if (!isValidEmail(loginEmail)) {
       setLoginError("Enter a valid email address.");
-      return;
-    }
-    const loginPasswordError = getPasswordLengthError(loginPassword);
-    if (loginPasswordError) {
-      setLoginError(loginPasswordError);
       return;
     }
     setLoginError("");

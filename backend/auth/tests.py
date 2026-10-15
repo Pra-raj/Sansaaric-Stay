@@ -1,6 +1,10 @@
 import json
+import os
+import subprocess
+import sys
 import time
 import uuid
+from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 import jwt
@@ -8,14 +12,14 @@ import yaml
 from cryptography.hazmat.primitives.asymmetric import ec
 from django.conf import settings
 from django.contrib.auth import get_user_model
+from django.core.cache import cache
 from django.db import IntegrityError
 from django.test import SimpleTestCase, TestCase
 from rest_framework import exceptions
 from rest_framework.test import APIClient, APIRequestFactory
-from supabase_auth.errors import AuthApiError
 
-from auth import services
-from auth.authentication import SupabaseJWTAuthentication
+from auth import local
+from auth.authentication import LocalJWTAuthentication, SupabaseJWTAuthentication
 from auth.models import Profile
 from auth.sync import sync_user
 
@@ -28,6 +32,71 @@ class SettingsTest(SimpleTestCase):
 
     def test_default_audience(self):
         self.assertEqual(settings.SUPABASE_JWT_AUDIENCE, "authenticated")
+
+    # S1/A5 run against a fresh import of the settings module, because the
+    # values under test are read once at import time. backend/.env loading is
+    # disabled in the child so a developer's local file can't mask a defect.
+
+    BACKEND_DIR = Path(__file__).resolve().parent.parent
+
+    def _import_settings(self, body, env=None):
+        code = (
+            "import os, sys\n"
+            "sys.path.insert(0, os.environ['BACKEND_DIR'])\n"
+            "import dotenv\n"
+            "dotenv.load_dotenv = lambda *a, **k: None\n" + body
+        )
+        child_env = dict(os.environ, BACKEND_DIR=str(self.BACKEND_DIR))
+        child_env.pop("DJANGO_SECRET_KEY", None)
+        child_env.pop("DJANGO_DEBUG", None)
+        child_env.update(env or {})
+        return subprocess.run(
+            [sys.executable, "-c", code],
+            env=child_env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+
+    @staticmethod
+    def _probe(code):
+        return (
+            "try:\n"
+            f"    {code}\n"
+            "except Exception as exc:\n"
+            "    print(type(exc).__name__)\n"
+            "else:\n"
+            "    print('imported')\n"
+        )
+
+    def test_missing_secret_key_fails_closed(self):
+        result = self._import_settings(self._probe("import config.settings"))
+        self.assertEqual(result.stdout.strip(), "ImproperlyConfigured", result.stderr)
+
+    def test_insecure_default_secret_key_is_rejected(self):
+        for default in ("local-dev-key", "change_me"):
+            with self.subTest(secret=default):
+                result = self._import_settings(
+                    self._probe("import config.settings"),
+                    {"DJANGO_SECRET_KEY": default},
+                )
+                self.assertEqual(
+                    result.stdout.strip(), "ImproperlyConfigured", result.stderr
+                )
+
+    def test_debug_defaults_off(self):
+        result = self._import_settings(
+            "import config.settings as s\nprint('DEBUG=' + str(s.DEBUG))\n",
+            {"DJANGO_SECRET_KEY": "x" * 50},
+        )
+        self.assertEqual(result.stdout.strip(), "DEBUG=False", result.stderr)
+
+    def test_debug_can_be_switched_on_explicitly(self):
+        result = self._import_settings(
+            "import config.settings as s\nprint('DEBUG=' + str(s.DEBUG))\n",
+            {"DJANGO_SECRET_KEY": "x" * 50, "DJANGO_DEBUG": "1"},
+        )
+        self.assertEqual(result.stdout.strip(), "DEBUG=True", result.stderr)
 
 
 class ProfileModelTest(TestCase):
@@ -45,84 +114,13 @@ class ProfileModelTest(TestCase):
             Profile.objects.create(user=user2, supabase_uid="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
 
 
-class SupabaseAuthServiceTest(TestCase):
-    def _patch_client(self, fake_auth):
-        fake_client = SimpleNamespace(auth=fake_auth)
-        patcher = mock.patch.object(services, "create_client", return_value=fake_client)
-        patcher.start()
-        self.addCleanup(patcher.stop)
-
-    def test_sign_up_forwards_email_password_and_calls_go_true(self):
-        fake = mock.Mock()
-        fake.sign_up.return_value = SimpleNamespace(user="USER", session="SESSION")
-        self._patch_client(fake)
-        svc = services.SupabaseAuthService()
-        result = svc.sign_up("a@b.co", "s3cret", full_name="Jane Doe")
-        fake.sign_up.assert_called_once_with({
-            "email": "a@b.co",
-            "password": "s3cret",
-            "options": {"data": {"full_name": "Jane Doe"}},
-        })
-        self.assertEqual(result.user, "USER")
-
-    def test_sign_up_without_full_name_omits_metadata(self):
-        fake = mock.Mock()
-        fake.sign_up.return_value = SimpleNamespace(user="USER", session=None)
-        self._patch_client(fake)
-        svc = services.SupabaseAuthService()
-        svc.sign_up("a@b.co", "s3cret")
-        fake.sign_up.assert_called_once_with({
-            "email": "a@b.co",
-            "password": "s3cret",
-            "options": {},
-        })
-
-    def test_unconfigured_server_raises_503(self):
-        with mock.patch.object(services.settings, "SUPABASE_PUBLISHABLE_KEY", ""):
-            with self.assertRaises(services.SupabaseAuthError) as ctx:
-                services.SupabaseAuthService()
-        self.assertEqual(ctx.exception.status, 503)
-
-    def test_api_error_number_is_mapped_through(self):
-        fake = mock.Mock()
-        fake.sign_in_with_password.side_effect = AuthApiError("oops", 429, "unexpected_failure")
-        self._patch_client(fake)
-        svc = services.SupabaseAuthService()
-        with self.assertRaises(services.SupabaseAuthError) as ctx:
-            svc.sign_in_with_password("a@b.co", "s3cret")
-        self.assertEqual(ctx.exception.code, "auth_error")
-
-    def test_already_registered_is_409(self):
-        fake = mock.Mock()
-        fake.sign_up.side_effect = AuthApiError("User already registered", 400, "user_already_exists")
-        self._patch_client(fake)
-        svc = services.SupabaseAuthService()
-        with self.assertRaises(services.SupabaseAuthError) as ctx:
-            svc.sign_up("a@b.co", "s3cret")
-        self.assertEqual(ctx.exception.code, "user_already_registered")
-        self.assertEqual(ctx.exception.status, 409)
-
-    def test_refresh_session_and_revoke_session_forward_correctly(self):
-        fake = mock.Mock()
-        fake.refresh_session.return_value = SimpleNamespace(session="S")
-        fake.set_session.return_value = None
-        fake.sign_out.return_value = None
-        self._patch_client(fake)
-        svc = services.SupabaseAuthService()
-        self.assertEqual(svc.refresh_session("rt").session, "S")
-        fake.refresh_session.assert_called_once_with(refresh_token="rt")
-        svc.revoke_session("at", "rt")
-        fake.set_session.assert_called_once_with("at", "rt")
-        fake.sign_out.assert_called_once()
-
+class SyncUserTest(TestCase):
     def test_profile_cascade_deletes_with_user(self):
         user = User.objects.create_user(username="uid-3", email="a@b.co")
         profile = Profile.objects.create(user=user, supabase_uid="ffffffff-aaaa-bbbb-cccc-dddddddddddd")
         user.delete()
         self.assertFalse(Profile.objects.filter(pk=profile.pk).exists())
 
-
-class SyncUserTest(TestCase):
     def _sb_user(self, uid="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", email="a@b.co", name="Jane Doe"):
         return SimpleNamespace(
             id=uid,
@@ -242,168 +240,239 @@ def _fake_session():
     )
 
 
+class LocalJWTAuthenticationTest(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(username="loki", email="loki@example.com", password="pw")
+        self.request_factory = APIRequestFactory()
+
+    def _auth(self):
+        return LocalJWTAuthentication()
+
+    def _request(self, token=None):
+        headers = {"HTTP_AUTHORIZATION": f"Bearer {token}"} if token else {}
+        return self.request_factory.get("/api/auth/me", **headers)
+
+    def test_valid_token_authenticates(self):
+        token = local.issue_session(self.user).access_token
+        user, raw = self._auth().authenticate(self._request(token))
+        self.assertEqual(user, self.user)
+        self.assertEqual(raw, token)
+
+    def test_missing_header_returns_none(self):
+        self.assertIsNone(self._auth().authenticate(self._request()))
+
+    def test_non_local_token_returns_none(self):
+        self.assertIsNone(self._auth().authenticate(self._request("not.a.real.jwt")))
+
+    def test_refresh_token_is_not_an_access_token(self):
+        refresh = local.issue_session(self.user).refresh_token
+        self.assertIsNone(self._auth().authenticate(self._request(refresh)))
+
+    def test_expired_token_is_rejected(self):
+        # A9: sign with the real key (sha256(SECRET_KEY)) so only `exp` is
+        # wrong — the previous raw-SECRET_KEY signature failed verification
+        # before ever reaching the expiry check. Prove the signature/claims
+        # are otherwise valid, then that expiry is what rejects the token.
+        token = jwt.encode(
+            {
+                "sub": str(self.user.pk), "typ": "access",
+                "iat": int(time.time()) - 200, "exp": int(time.time()) - 100,
+            },
+            local._SIGNING_KEY, algorithm="HS256",
+        )
+        verified = jwt.decode(token, local._SIGNING_KEY, algorithms=["HS256"],
+                              options={"verify_exp": False})
+        self.assertEqual(verified["sub"], str(self.user.pk))
+        # Expired local tokens are deferred to the next authenticator, so
+        # LocalJWT returns None (does not authenticate them).
+        self.assertIsNone(self._auth().authenticate(self._request(token)))
+
+    def test_inactive_user_is_rejected(self):
+        self.user.is_active = False
+        self.user.save(update_fields=["is_active"])
+        token = local.issue_session(self.user).access_token
+        with self.assertRaises(exceptions.AuthenticationFailed):
+            self._auth().authenticate(self._request(token))
+
+
 class SignupLoginViewTest(TestCase):
     def setUp(self):
         self.client = APIClient()
+        # The A1 auth throttle is 10/min per IP; every test here shares
+        # 127.0.0.1, so without a reset the history bleeds across tests.
+        cache.clear()
 
-    def _patch_service(self, **methods):
-        fake = SimpleNamespace(**methods)
-        patcher = mock.patch.object(services, "SupabaseAuthService", return_value=fake)
-        patcher.start()
-        self.addCleanup(patcher.stop)
-        return fake
-
-    def test_signup_with_session_returns_201_and_syncs(self):
-        fake = self._patch_service(
-            sign_up=lambda email, password, full_name=None: SimpleNamespace(
-                user=_fake_supabase_user(), session=_fake_session()
-            )
-        )
+    def test_signup_creates_user_and_returns_session(self):
         response = self.client.post(
             "/api/auth/signup",
-            {"email": "user@example.com", "password": "s3cret", "full_name": "Jane Doe"},
+            {"email": "jane@example.com", "password": "Sunrise-Lodge-7", "full_name": "Jane Doe"},
             format="json",
         )
         self.assertEqual(response.status_code, 201)
         body = response.json()
-        self.assertEqual(body["user"]["email"], "user@example.com")
+        self.assertEqual(body["user"]["email"], "jane@example.com")
         self.assertTrue(body["user"]["email_confirmed"])
-        self.assertEqual(body["session"]["access_token"], "ACCESS")
-        self.assertTrue(Profile.objects.filter(supabase_uid="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee").exists())
+        user = User.objects.get(email="jane@example.com")
+        self.assertTrue(Profile.objects.filter(user=user).exists())
+        claims = local.decode_access(body["session"]["access_token"])
+        self.assertEqual(claims["sub"], str(user.pk))
 
-    def test_signup_without_confirm_returns_null_session_message(self):
-        fake = self._patch_service(
-            sign_up=lambda email, password, full_name=None: SimpleNamespace(
-                user=_fake_supabase_user(confirmed=False), session=None
-            )
-        )
+    def test_signup_without_name_uses_empty_first_name(self):
         response = self.client.post(
             "/api/auth/signup",
-            {"email": "user@example.com", "password": "s3cret"},
+            {"email": "no-name@example.com", "password": "Sunrise-Lodge-7"},
             format="json",
         )
         self.assertEqual(response.status_code, 201)
-        body = response.json()
-        self.assertIsNone(body["session"])
-        self.assertIn("confirm", body["message"].lower())
-        self.assertFalse(Profile.objects.exists())
+        self.assertEqual(User.objects.get(email="no-name@example.com").first_name, "")
 
-    def test_signup_already_registered_returns_409(self):
-        def raise_conflict(**kwargs):
-            raise services.SupabaseAuthError("user_already_registered", "User already registered", 409)
-        self._patch_service(sign_up=raise_conflict)
+    def test_signup_taken_email_returns_409(self):
+        User.objects.create_user(username="taken", email="taken@example.com", password="pw")
         response = self.client.post(
             "/api/auth/signup",
-            {"email": "taken@example.com", "password": "s3cret"},
+            {"email": "taken@example.com", "password": "Sunrise-Lodge-7"},
             format="json",
         )
         self.assertEqual(response.status_code, 409)
         self.assertEqual(response.json()["error"], "user_already_registered")
 
-    def test_login_success_returns_access_token_and_syncs(self):
-        self._patch_service(
-            sign_in_with_password=lambda email, password: SimpleNamespace(
-                user=_fake_supabase_user(), session=_fake_session()
-            )
+    def test_signup_weak_password_rejected(self):
+        # A2: AUTH_PASSWORD_VALIDATORS run server-side, so a password the UI
+        # would reject never creates an account.
+        response = self.client.post(
+            "/api/auth/signup",
+            {"email": "weak@example.com", "password": "s3cret"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(User.objects.filter(email="weak@example.com").exists())
+
+    def test_login_by_email_returns_access_token(self):
+        User.objects.create_user(
+            username="demo.admin", email="demo.admin@sansaaric.com", password="SuperAdmin@123"
         )
         response = self.client.post(
             "/api/auth/login",
-            {"email": "user@example.com", "password": "s3cret"},
+            {"email": "demo.admin@sansaaric.com", "password": "SuperAdmin@123"},
             format="json",
         )
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["user"]["email"], "user@example.com")
-        self.assertEqual(response.json()["session"]["refresh_token"], "REFRESH")
-        self.assertTrue(User.objects.filter(username="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee").exists())
+        body = response.json()
+        self.assertEqual(body["user"]["email"], "demo.admin@sansaaric.com")
+        self.assertTrue(body["session"]["access_token"])
+        self.assertTrue(body["session"]["refresh_token"])
 
-    def test_login_invalid_credentials_returns_401(self):
-        def reject(**kwargs):
-            raise services.SupabaseAuthError("invalid_credentials", "Invalid login credentials", 401)
-        self._patch_service(sign_in_with_password=reject)
+    def test_login_by_username_works(self):
+        User.objects.create_user(
+            username="demo.admin", email="demo.admin@sansaaric.com", password="SuperAdmin@123"
+        )
         response = self.client.post(
             "/api/auth/login",
-            {"email": "nope@example.com", "password": "wrong"},
+            {"email": "demo.admin", "password": "SuperAdmin@123"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 200)
+
+    def test_login_wrong_password_returns_401(self):
+        User.objects.create_user(
+            username="demo.admin", email="demo.admin@sansaaric.com", password="SuperAdmin@123"
+        )
+        response = self.client.post(
+            "/api/auth/login",
+            {"email": "demo.admin@sansaaric.com", "password": "wrong-pass"},
             format="json",
         )
         self.assertEqual(response.status_code, 401)
         self.assertEqual(response.json()["error"], "invalid_credentials")
 
+    def test_login_unknown_account_returns_401(self):
+        response = self.client.post(
+            "/api/auth/login",
+            {"email": "nobody@example.com", "password": "s3cret"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 401)
+
+    def test_login_scope_returns_429_after_n_attempts(self):
+        # A1: the `auth` scope (10/min per IP) stops credential stuffing.
+        statuses = [
+            self.client.post(
+                "/api/auth/login",
+                {"email": "nobody@example.com", "password": "wrong-pass"},
+                format="json",
+            ).status_code
+            for _ in range(11)
+        ]
+        self.assertEqual(statuses[-1], 429)
+        self.assertIn(401, statuses)  # earlier attempts still reach the view
+
 
 class RefreshLogoutMeViewTest(TestCase):
     def setUp(self):
         self.client = APIClient()
-
-    def _patch_service(self, **methods):
-        fake = SimpleNamespace(**methods)
-        patcher = mock.patch.object(services, "SupabaseAuthService", return_value=fake)
-        patcher.start()
-        self.addCleanup(patcher.stop)
-        return fake
-
-    def _sync_user(self, uid="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", email="user@example.com"):
-        from auth.sync import sync_user
-        return sync_user(
-            SimpleNamespace(id=uid, email=email, user_metadata={"full_name": "Jane Doe"})
-        )[0]
-
-    def test_refresh_returns_new_session(self):
-        fake = self._patch_service(
-            refresh_session=lambda refresh_token: SimpleNamespace(
-                session=_fake_session()
-            )
+        # Shares the A1 `auth` throttle bucket (10/min per IP) above.
+        cache.clear()
+        self.user = User.objects.create_user(
+            username="demo.admin", email="demo.admin@sansaaric.com",
+            password="SuperAdmin@123", first_name="Sansaaric",
         )
+
+    def test_refresh_issues_new_access_token_and_keeps_refresh(self):
+        session = local.issue_session(self.user)
         response = self.client.post(
-            "/api/auth/refresh", {"refresh_token": "OLD"}, format="json"
+            "/api/auth/refresh", {"refresh_token": session.refresh_token}, format="json"
         )
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["session"]["refresh_token"], "REFRESH")
+        body = response.json()["session"]
+        self.assertEqual(body["refresh_token"], session.refresh_token)
+        claims = local.decode_access(body["access_token"])
+        self.assertEqual(claims["sub"], str(self.user.pk))
 
-    def test_refresh_invalid_token_returns_401(self):
-        def reject(refresh_token):
-            raise services.SupabaseAuthError("invalid_token", "Invalid refresh token", 401)
-        self._patch_service(refresh_session=reject)
+    def test_refresh_rejects_an_access_token(self):
+        session = local.issue_session(self.user)
         response = self.client.post(
-            "/api/auth/refresh", {"refresh_token": "BAD"}, format="json"
+            "/api/auth/refresh", {"refresh_token": session.access_token}, format="json"
         )
         self.assertEqual(response.status_code, 401)
         self.assertEqual(response.json()["error"], "invalid_token")
+
+    def test_refresh_rejects_garbage(self):
+        response = self.client.post(
+            "/api/auth/refresh", {"refresh_token": "garbage"}, format="json"
+        )
+        self.assertEqual(response.status_code, 401)
 
     def test_logout_requires_authentication(self):
         response = self.client.post("/api/auth/logout", {}, format="json")
         self.assertEqual(response.status_code, 401)
 
-    def test_logout_revokes_session_and_returns_204(self):
-        fake = self._patch_service(revoke_session=mock.Mock(return_value=None))
-        user = self._sync_user()
-        self.client.force_authenticate(user=user, token="RAW-ACCESS-TOKEN")
+    def test_logout_returns_204(self):
+        self.client.force_authenticate(user=self.user)
         response = self.client.post(
-            "/api/auth/logout", {"refresh_token": "RT"}, format="json"
+            "/api/auth/logout", {"refresh_token": "whatever"}, format="json"
         )
         self.assertEqual(response.status_code, 204)
-        fake.revoke_session.assert_called_once_with("RAW-ACCESS-TOKEN", "RT")
-
-    def test_logout_without_refresh_token_still_returns_204(self):
-        fake = self._patch_service(revoke_session=mock.Mock(return_value=None))
-        user = self._sync_user()
-        self.client.force_authenticate(user=user, token="RAW-ACCESS-TOKEN")
-        response = self.client.post("/api/auth/logout", {}, format="json")
-        self.assertEqual(response.status_code, 204)
-        fake.revoke_session.assert_not_called()
 
     def test_me_requires_authentication(self):
         response = self.client.get("/api/auth/me")
         self.assertEqual(response.status_code, 401)
 
-    def test_me_returns_synced_user(self):
-        self._sync_user()
-        user = User.objects.get(username="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
-        self.client.force_authenticate(user=user)
+    def test_me_returns_staff_role(self):
+        self.user.is_staff = True
+        self.user.save(update_fields=["is_staff"])
+        self.client.force_authenticate(user=self.user)
         response = self.client.get("/api/auth/me")
         self.assertEqual(response.status_code, 200)
-        body = response.json()["user"]
-        self.assertEqual(body["supabase_uid"], "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
-        self.assertEqual(body["email"], "user@example.com")
-        self.assertEqual(body["full_name"], "Jane Doe")
+        self.assertEqual(response.json()["role"], "admin")
+        self.assertTrue(response.json()["is_staff"])
+
+    def test_me_returns_profile_role_when_not_staff(self):
+        Profile.objects.create(
+            user=self.user, supabase_uid=str(uuid.uuid4()), role="hotel_owner"
+        )
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get("/api/auth/me")
+        self.assertEqual(response.json()["role"], "hotel_owner")
 
 
 class ApiDocsTest(SimpleTestCase):

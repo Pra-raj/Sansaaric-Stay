@@ -1,4 +1,5 @@
 import os
+import sys
 
 from django.apps import AppConfig
 
@@ -7,9 +8,14 @@ class DocumentsConfig(AppConfig):
     name = 'document_ingestion'
 
     def ready(self):
-        # Web deployments run a dedicated `python manage.py trainworker`
-        # process. For single-process dev you may set
-        # INGESTION_EMBEDDED_WORKER=1 to run the worker inside the web process.
+        # Skip the background worker (and the expensive pipeline prewarm) for
+        # management commands like test/migrate/collectstatic where probing a
+        # live DB/GPU/LLM at boot is noise or actively disruptive.
+        if any(arg in sys.argv for arg in ("test", "migrate", "collectstatic")):
+            return
+        # Any served web process ingests documents automatically via an
+        # in-process polling worker (disable with INGESTION_EMBEDDED_WORKER=0
+        # when a dedicated `python manage.py trainworker` process is running).
         from .ingestion import automation
         automation.ensure_embedded_worker()
 

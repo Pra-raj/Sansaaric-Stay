@@ -7,7 +7,7 @@ grounded, cited answers via a Groq LLM with Cohere reranking.
 ## Architecture at a glance
 
 ```
-upload /docadmin  ──►  document_ingestion  ──► chunks + embeddings (pgvector)
+upload (admin app) ──►  document_ingestion  ──► chunks + embeddings (pgvector)
                         │
 chat (web + API)   ──►  retrieve: hybrid (pgvector + full-text) search
                         ├─ reformulate question (LLM, if history)
@@ -18,13 +18,12 @@ chat (web + API)   ──►  retrieve: hybrid (pgvector + full-text) search
 
 - **Database:** Supabase PostgreSQL with the `pgvector` extension.
 - **Storage:** Supabase S3-compatible bucket (`document`), wired through `django-storages`.
-- **Worker:** training runs in a **dedicated `python manage.py trainworker`**
-  process that polls the database (`FOR UPDATE SKIP LOCKED`) and claims
-  documents with a crash-safe heartbeat — no Celery/qcluster/broker required.
-  Web processes only mark documents `pending`; a crashed worker's orphaned
-  `processing` documents are reclaimed once their heartbeat goes stale.
-  For single-process dev you can set `INGESTION_EMBEDDED_WORKER=1` to run the
-  worker as a thread inside the web process.
+- **Worker:** document training runs in an **in-process polling worker inside
+  every served web process** (disable with `INGESTION_EMBEDDED_WORKER=0`), or in
+  a dedicated `python manage.py trainworker` process. Workers claim documents
+  atomically (`FOR UPDATE SKIP LOCKED`) with a crash-safe heartbeat — no
+  Celery/qcluster/broker required. A crashed worker's orphaned `processing`
+  documents are reclaimed once their heartbeat goes stale.
 - **Models:** `ReferenceDocument` + `Chunk` (embedding `vector(384)`, HNSW index, full-text index), `Conversation` + `Message` (with citations).
 
 ---
@@ -70,7 +69,7 @@ cp .env.example .env
 | `SUPABASE_S3_REGION` | no | Default `us-east-1` |
 | `GROQ_API_KEY` | yes | Groq LLM provider |
 | `COHERE_API_KEY` | no | Enables reranking if present (skipped otherwise) |
-| `MAX_UPLOAD_SIZE_MB` | no | Per-file upload cap at `/docadmin/` (default `50`) |
+| `MAX_UPLOAD_SIZE_MB` | no | Per-file upload cap for documents (default `50`) |
 
 ## 2. Install dependencies
 
@@ -104,9 +103,11 @@ python manage.py runserver
 
 The server is available at http://127.0.0.1:8000.
 
-> **Document training needs a worker.** Either run the worker in a second
-> terminal (`python manage.py trainworker`) or set `INGESTION_EMBEDDED_WORKER=1`
-> in `.env` to run it inside the web process (single-process dev convenience).
+> **Document training runs automatically.** Every served web process starts an
+> in-process ingestion worker, so uploads are parsed, chunked, embedded and
+> stored in the vector DB without any extra step. Set
+> `INGESTION_EMBEDDED_WORKER=0` to disable when a dedicated
+> `python manage.py trainworker` process is running instead.
 
 ---
 
@@ -120,15 +121,12 @@ The server is available at http://127.0.0.1:8000.
 | `/api/recommendations` | Personalized (or popularity) hotel picks | anyone |
 | `/api/recommendations/similar/<id>` | Similar stays for a hotel | anyone |
 | `/healthz` | Liveness probe (checks DB connectivity) | anyone |
-| `/docadmin/` | Upload / train / delete documents | staff (login required) |
-| `/docadmin/status/` | Document + chunk status JSON | staff |
-| `/docadmin/chats/` | Review user conversations | staff |
 | `/admin/` | Django admin | staff |
 | `/accounts/login/` | Login | — |
-| `/api/auth/signup` | Create a Supabase account | anyone |
+| `/api/auth/signup` | Create a (local or Supabase) account | anyone |
 | `/api/auth/login` | Exchange email/password for a session | anyone |
-| `/api/auth/refresh` | Rotate a refresh token | anyone |
-| `/api/auth/logout` | Revoke the current Supabase session | Bearer token |
+| `/api/auth/refresh` | Refresh a session | anyone |
+| `/api/auth/logout` | End the current session | Bearer token |
 | `/api/auth/me` | Current (synced) user | Bearer token |
 
 ### Recommendations
@@ -220,14 +218,14 @@ bypass it automatically.
 
 ## Training documents
 
-1. Log in to `/docadmin/`.
-2. Upload one or more files (max one per document; supported types:
-   `pdf`, `docx`, `txt`, `md`, `csv`, `xlsx`, `xls`).
-3. The document is queued and trained in the background. Rows stream in via
-   `/docadmin/status/`. Status lifecycle: `pending → processing → ready` (or `failed`).
+Documents are managed through the admin app's **Documents** area (staff-only).
+Upload one or more files (max one per document; supported types: `pdf`,
+`docx`, `txt`, `md`, `csv`, `xlsx`, `xls`). The document is queued and trained
+in the background by the dedicated `trainworker`; status lifecycle:
+`pending → processing → ready` (or `failed`).
 
-Failed documents expose the error message on the dashboard; the **Re-train**
-button re-runs the pipeline. Downloads are only queryable once status is `ready`.
+Failed documents expose the error message in the UI; the **Re-train** button
+re-runs the pipeline. Downloads are only queryable once status is `ready`.
 
 ## Docker
 
@@ -240,21 +238,25 @@ docker compose up --build
 ```
 
 This mounts `./backend` into the container, applies migrations on start, and
-runs the dev server on port 8000 plus a dedicated `trainworker` container. The
-containers read `./backend/.env`. The backend service has a `/healthz`
-health-check wired into `docker compose`.
+runs the dev server on port 8000 plus a dedicated `trainworker` container (the
+web service explicitly disables its in-process worker so the dedicated one is
+the only trainer). The containers read `./backend/.env`. The backend service
+has a `/healthz` health-check wired into `docker compose`.
 
 For production the `Dockerfile` runs **gunicorn** (2 workers × 8 threads, 120s
 timeout — overridable via `GUNICORN_WORKERS`/`GUNICORN_THREADS`/
 `GUNICORN_TIMEOUT`/`GUNICORN_GRACEFUL_TIMEOUT`) with `collectstatic` on boot;
-static files are served by **WhiteNoise** (`CompressedManifest`), so no nginx
-is required for a single-container deployment.
+each gunicorn worker starts an in-process ingestion poller, so uploads train
+automatically in a single-container deployment. Static files are served by
+**WhiteNoise** (`CompressedManifest`), so no nginx is required for a
+single-container deployment.
 
 ## Tests
 
 The suite covers the chat API (validation, rate limiting, cache, streaming,
 history pairing), document ingestion (cleaning, tables, loaders, chunking,
-upload limits, worker claim/staleness), and recommendations (Bayesian rating,
+upload limits, worker claim/staleness), auth (signup/login/refresh/logout,
+password rules, throttle, JWT decode), and recommendations (Bayesian rating,
 content and collaborative scoring, cold start, visibility, availability,
 determinism, and `sort=recommended`). DB-backed tests need Postgres with
 pgvector; unit tests run against a plain local install.
@@ -266,11 +268,11 @@ docker run -d --name test-pg -e POSTGRES_PASSWORD=postgres \
 
 SUPABASE_DB_HOST=127.0.0.1 SUPABASE_DB_PORT=5432 \
 SUPABASE_DB_USER=postgres SUPABASE_DB_PASSWORD=postgres \
-SUPABASE_DB_SSLMODE=prefer python manage.py test chat document_ingestion recommendations
+SUPABASE_DB_SSLMODE=prefer python manage.py test chat document_ingestion auth recommendations
 ```
 
-CI (`.github/workflows/ci.yml`) runs the same checks against a pgvector service
-container.
+Run the gate locally (no CI is configured): the command above for the
+documented apps, or `python manage.py test` for the full suite.
 
 ## Project layout
 

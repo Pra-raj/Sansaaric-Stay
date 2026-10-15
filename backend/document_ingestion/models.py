@@ -25,7 +25,6 @@ class ReferenceDocument(models.Model):
     ]
 
     document_id = models.UUIDField(default=uuid.uuid4, editable=False, unique=True)
-    title = models.CharField(max_length=255)
     file = models.FileField(upload_to="documents/", blank=True)
     file_name = models.CharField(max_length=255)
     file_type = models.CharField(max_length=20, choices=FILE_TYPES)
@@ -46,7 +45,7 @@ class ReferenceDocument(models.Model):
         ordering = ["-created_at"]
 
     def __str__(self):
-        return self.title
+        return self.file_name
 
 
 class Chunk(models.Model):
@@ -79,4 +78,4 @@ class Chunk(models.Model):
         ]
 
     def __str__(self):
-        return f"{self.document.title} #{self.chunk_index}"
+        return f"{self.document.file_name} #{self.chunk_index}"

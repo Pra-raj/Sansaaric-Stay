@@ -1,4 +1,5 @@
 from django.contrib.auth import get_user_model
+from django.db import IntegrityError
 
 from .models import Profile
 
@@ -8,10 +9,19 @@ def sync_user(supabase_user):
     uid = str(supabase_user.id)
     email = getattr(supabase_user, "email", "") or ""
     first_name = _full_name(supabase_user)
-    user, created = User.objects.get_or_create(
-        username=uid,
-        defaults={"email": email, "first_name": first_name},
-    )
+    try:
+        user, created = User.objects.get_or_create(
+            username=uid,
+            defaults={"email": email, "first_name": first_name},
+        )
+    except IntegrityError:
+        # Email already belongs to a different Supabase account: adopt the
+        # existing user instead of failing the request (fixes the split-brain
+        # where two uids produced two accounts for one email).
+        user = User.objects.filter(email__iexact=email).first()
+        if user is None:
+            raise
+        created = False
     if not created:
         fields = []
         if email and user.email != email:

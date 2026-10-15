@@ -1,17 +1,20 @@
-import logging
+import uuid
 
+from django.contrib.auth import get_user_model
+from django.db import IntegrityError
 from drf_spectacular.utils import extend_schema
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
+from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
-from . import services
+from . import local
+from .models import Profile
 from .serializers import (
     AuthResponseSerializer,
     ErrorSerializer,
     LoginSerializer,
-    LogoutSerializer,
     MePayloadSerializer,
     RefreshResponseSerializer,
     RefreshSerializer,
@@ -19,15 +22,23 @@ from .serializers import (
     serialize_session,
     serialize_user,
 )
-from .sync import sync_user
 
 
-def _auth_payload(supabase_user, session):
+def _auth_payload(user, session):
     return {
-        "user": serialize_user(supabase_user),
+        "user": serialize_user(user),
         "session": serialize_session(session),
         "message": None,
     }
+
+
+def _unique_username(email):
+    base = email[:140]
+    username, n = base, 1
+    while get_user_model().objects.filter(username=username).exists():
+        n += 1
+        username = f"{base}-{n}"
+    return username
 
 
 @extend_schema(
@@ -37,31 +48,38 @@ def _auth_payload(supabase_user, session):
         201: AuthResponseSerializer,
         400: ErrorSerializer,
         409: ErrorSerializer,
-        503: ErrorSerializer,
     },
 )
 class SignupView(APIView):
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "auth"
+
     def post(self, request):
         serializer = SignupSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
-        try:
-            resp = services.SupabaseAuthService().sign_up(
-                email=data["email"], password=data["password"], full_name=data.get("full_name")
-            )
-        except services.SupabaseAuthError as exc:
-            return Response({"error": exc.code, "detail": exc.detail}, status=exc.status)
-        if resp.session is None:
+        email = data["email"]
+        if get_user_model().objects.filter(email__iexact=email).exists():
             return Response(
-                {
-                    "user": serialize_user(resp.user),
-                    "session": None,
-                    "message": "Check your email to confirm your account.",
-                },
-                status=status.HTTP_201_CREATED,
+                {"error": "user_already_registered", "detail": "A user with that email already exists."},
+                status=status.HTTP_409_CONFLICT,
             )
-        sync_user(resp.user)
-        return Response(_auth_payload(resp.user, resp.session), status=status.HTTP_201_CREATED)
+        try:
+            user = get_user_model().objects.create_user(
+                username=_unique_username(email),
+                email=email,
+                password=data["password"],
+                first_name=data.get("full_name") or "",
+            )
+            Profile.objects.create(user=user, supabase_uid=uuid.uuid4())
+        except IntegrityError:
+            # The unique LOWER(email) index is the source of truth; a race past
+            # the pre-check lands here instead of minting a duplicate account.
+            return Response(
+                {"error": "user_already_registered", "detail": "A user with that email already exists."},
+                status=status.HTTP_409_CONFLICT,
+            )
+        return Response(_auth_payload(user, local.issue_session(user)), status=status.HTTP_201_CREATED)
 
 
 @extend_schema(
@@ -71,22 +89,23 @@ class SignupView(APIView):
         200: AuthResponseSerializer,
         400: ErrorSerializer,
         401: ErrorSerializer,
-        503: ErrorSerializer,
     },
 )
 class LoginView(APIView):
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "auth"
+
     def post(self, request):
         serializer = LoginSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
-        try:
-            resp = services.SupabaseAuthService().sign_in_with_password(
-                email=data["email"], password=data["password"]
+        user = local.authenticate(data["email"], data["password"])
+        if user is None:
+            return Response(
+                {"error": "invalid_credentials", "detail": "Invalid login credentials."},
+                status=status.HTTP_401_UNAUTHORIZED,
             )
-        except services.SupabaseAuthError as exc:
-            return Response({"error": exc.code, "detail": exc.detail}, status=exc.status)
-        sync_user(resp.user)
-        return Response(_auth_payload(resp.user, resp.session))
+        return Response(_auth_payload(user, local.issue_session(user)))
 
 
 @extend_schema(
@@ -95,40 +114,41 @@ class LoginView(APIView):
     responses={200: RefreshResponseSerializer, 401: ErrorSerializer},
 )
 class RefreshView(APIView):
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "auth"
+
     def post(self, request):
         serializer = RefreshSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        refresh_token = serializer.validated_data["refresh_token"]
-        try:
-            resp = services.SupabaseAuthService().refresh_session(refresh_token)
-        except services.SupabaseAuthError as exc:
-            return Response({"error": exc.code, "detail": exc.detail}, status=exc.status)
-        if resp.session is None:
+        claims = local.decode_refresh(serializer.validated_data["refresh_token"])
+        if claims is None:
             return Response(
-                {"error": "session_missing", "detail": "No session returned."},
+                {"error": "invalid_token", "detail": "Invalid refresh token."},
                 status=status.HTTP_401_UNAUTHORIZED,
             )
-        return Response({"session": serialize_session(resp.session)})
+        user = get_user_model().objects.filter(pk=claims["sub"], is_active=True).first()
+        if user is None:
+            return Response(
+                {"error": "invalid_token", "detail": "Invalid refresh token."},
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
+        # The client only stores the refresh token it already has (auth.ts saves
+        # the access token alone), so the refresh token is echoed back unchanged.
+        session = local.issue_session(user)
+        session.refresh_token = serializer.validated_data["refresh_token"]
+        return Response({"session": serialize_session(session)})
 
 
 @extend_schema(
     tags=["Auth"],
-    request=LogoutSerializer,
     responses={204: None, 401: ErrorSerializer},
 )
 class LogoutView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
-        refresh_token = (request.data or {}).get("refresh_token", "")
-        if request.auth and refresh_token:
-            try:
-                services.SupabaseAuthService().revoke_session(request.auth, refresh_token)
-            except services.SupabaseAuthError:
-                # Revocation failure is tolerated/logged; the access token still expires.
-                logging.getLogger(__name__).warning(
-                    "Supabase session revocation failed for user %s", request.user.get_username()
-                )
+        # Access tokens expire on their own and refresh tokens are stateless,
+        # so there is nothing to revoke server-side.
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
@@ -141,14 +161,18 @@ class MeView(APIView):
 
     def get(self, request):
         user = request.user
+        # force_authenticate'd or createsuperuser'd users may have no Profile.
+        profile = getattr(user, "profile", None)
         return Response(
             {
                 "user": {
                     "id": user.id,
-                    "supabase_uid": str(user.profile.supabase_uid),
+                    "supabase_uid": str(profile.supabase_uid) if profile else "",
                     "email": user.email or "",
                     "full_name": user.first_name or "",
                     "created_at": user.date_joined.isoformat(),
-                }
+                },
+                "role": "admin" if user.is_staff else (profile.role if profile else "guest"),
+                "is_staff": bool(user.is_staff),
             }
         )

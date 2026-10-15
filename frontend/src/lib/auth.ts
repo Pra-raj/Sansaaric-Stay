@@ -1,46 +1,154 @@
 import type { AuthUser } from "./auth-context";
-import { simulateNetwork } from "./simulate-network";
+import type { UserRole } from "@/types";
+import { API_BASE_URL as AUTH_BASE_URL } from "./api-base";
 
 const ACCESS_TOKEN_KEY = "sansaaric-access-token";
 const REFRESH_TOKEN_KEY = "sansaaric-refresh-token";
-const USER_KEY = "sansaaric-user";
 
-export interface AuthResult {
-  user: AuthUser;
+export interface SessionTokens {
   accessToken: string;
   refreshToken: string;
+}
+
+/** Thrown by every function here so the UI can show `message` verbatim. */
+export class AuthError extends Error {
+  /** Present when the server returned an HTTP error; missed on network failure. */
+  status?: number;
+  constructor(message: string, status?: number) {
+    super(message);
+    this.name = "AuthError";
+    if (status !== undefined) this.status = status;
+  }
+}
+
+interface SessionPayload {
+  access_token: string;
+  refresh_token: string;
+  expires_at: number;
+}
+
+interface AuthPayload {
+  session: SessionPayload | null;
+  message: string | null;
+}
+
+interface MePayload {
+  user: { id: number; supabase_uid: string; email: string; full_name: string };
+  role: UserRole;
 }
 
 function initials(name: string): string {
   return name.trim().charAt(0).toUpperCase() || "?";
 }
 
-// eslint-disable-next-line @typescript-eslint/no-unused-vars -- password placeholder until real backend verify
-export async function login(email: string, _password: string): Promise<AuthResult> {
-  const user: AuthUser = { name: "Prayag Raj Karki", email, initials: initials("Prayag Raj Karki") };
-  return simulateNetwork({
-    user,
-    accessToken: `fake-access-${Date.now()}`,
-    refreshToken: `fake-refresh-${Date.now()}`,
-  });
+/** DRF sends {detail} or {field: ["msg"]}; the auth views send {error, detail}. */
+function readError(data: unknown): string | null {
+  if (!data || typeof data !== "object") return null;
+  const record = data as Record<string, unknown>;
+  if (typeof record.detail === "string") return record.detail;
+  if (typeof record.error === "string") return record.error;
+  const first = Object.values(record)[0];
+  if (Array.isArray(first) && typeof first[0] === "string") return first[0];
+  return null;
 }
 
-// eslint-disable-next-line @typescript-eslint/no-unused-vars -- password placeholder until real auth backend exists
-export async function signup(name: string, email: string, _password: string): Promise<AuthResult> {
-  const user: AuthUser = { name, email, initials: initials(name) };
-  return simulateNetwork({
-    user,
-    accessToken: `fake-access-${Date.now()}`,
-    refreshToken: `fake-refresh-${Date.now()}`,
-  });
+async function authPost<T>(path: string, body: unknown): Promise<T> {
+  let res: Response;
+  const token = getAccessToken();
+  try {
+    res = await fetch(`${AUTH_BASE_URL}${path}`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      body: JSON.stringify(body),
+    });
+  } catch {
+    throw new AuthError("Can't reach the server. Check your connection and try again.");
+  }
+  const data = await res.json().catch(() => null);
+  if (!res.ok) {
+    throw new AuthError(readError(data) ?? "Something went wrong. Try again.", res.status);
+  }
+  return data as T;
+}
+
+function toTokens(payload: AuthPayload): SessionTokens {
+  if (!payload.session) {
+    throw new AuthError(payload.message ?? "Check your email to confirm your account.");
+  }
+  return {
+    accessToken: payload.session.access_token,
+    refreshToken: payload.session.refresh_token,
+  };
+}
+
+export async function signIn(email: string, password: string): Promise<SessionTokens> {
+  const tokens = toTokens(await authPost<AuthPayload>("/auth/login", { email, password }));
+  storeTokens(tokens);
+  return tokens;
+}
+
+export async function signUp(
+  name: string,
+  email: string,
+  password: string,
+): Promise<SessionTokens> {
+  const tokens = toTokens(
+    await authPost<AuthPayload>("/auth/signup", { email, password, full_name: name }),
+  );
+  storeTokens(tokens);
+  return tokens;
+}
+
+/** The role comes from /auth/me, not the login payload — that is where is_staff lives. */
+export async function fetchCurrentUser(): Promise<AuthUser> {
+  const token = getAccessToken();
+  if (!token) throw new AuthError("Not signed in.");
+
+  let res: Response;
+  try {
+    res = await fetch(`${AUTH_BASE_URL}/auth/me`, {
+      headers: { Authorization: `Bearer ${token}` },
+      cache: "no-store",
+    });
+  } catch {
+    throw new AuthError("Can't reach the server. Check your connection and try again.");
+  }
+  const data = await res.json().catch(() => null);
+  if (!res.ok) {
+    throw new AuthError(readError(data) ?? "Your session has expired.", res.status);
+  }
+  const me = data as MePayload;
+  const name = me.user.full_name || me.user.email;
+  return { name, email: me.user.email, initials: initials(name), role: me.role };
 }
 
 export async function refreshAccessToken(): Promise<string | null> {
   const refreshToken = getRefreshToken();
   if (!refreshToken) return null;
-  const newToken = `fake-access-${Date.now()}`;
-  setAccessToken(newToken);
-  return newToken;
+  try {
+    const data = await authPost<{ session: SessionPayload }>("/auth/refresh", {
+      refresh_token: refreshToken,
+    });
+    setAccessToken(data.session.access_token);
+    return data.session.access_token;
+  } catch {
+    return null;
+  }
+}
+
+/** Best-effort: the local session is cleared regardless of what the server says. */
+export async function revokeSession(): Promise<void> {
+  const token = getAccessToken();
+  const refreshToken = getRefreshToken();
+  if (!token || !refreshToken) return;
+  try {
+    await authPost<null>("/auth/logout", { refresh_token: refreshToken });
+  } catch {
+    // Revocation is best-effort; the access token expires on its own.
+  }
 }
 
 export function getAccessToken(): string | null {
@@ -57,29 +165,14 @@ export function setAccessToken(token: string): void {
   localStorage.setItem(ACCESS_TOKEN_KEY, token);
 }
 
-export function storeSession(result: AuthResult): void {
-  localStorage.setItem(ACCESS_TOKEN_KEY, result.accessToken);
-  localStorage.setItem(REFRESH_TOKEN_KEY, result.refreshToken);
-  localStorage.setItem(USER_KEY, JSON.stringify(result.user));
-}
-
-export function loadStoredUser(): AuthUser | null {
-  if (typeof window === "undefined") return null;
-  const raw = localStorage.getItem(USER_KEY);
-  if (!raw) return null;
-  try {
-    return JSON.parse(raw) as AuthUser;
-  } catch {
-    return null;
-  }
-}
-
-export function updateStoredUser(user: AuthUser): void {
-  localStorage.setItem(USER_KEY, JSON.stringify(user));
+export function storeTokens(tokens: SessionTokens): void {
+  localStorage.setItem(ACCESS_TOKEN_KEY, tokens.accessToken);
+  localStorage.setItem(REFRESH_TOKEN_KEY, tokens.refreshToken);
 }
 
 export function clearSession(): void {
   localStorage.removeItem(ACCESS_TOKEN_KEY);
   localStorage.removeItem(REFRESH_TOKEN_KEY);
-  localStorage.removeItem(USER_KEY);
+  // A thread owned by the logged-out account must not stay on this device.
+  localStorage.removeItem("sansaaric-chat-state");
 }

@@ -7,11 +7,16 @@ from .models import Booking
 
 class BookingSummarySerializer(serializers.ModelSerializer):
     room_id = serializers.PrimaryKeyRelatedField(read_only=True)
+    hotel_name = serializers.CharField(source="room.hotel.name", read_only=True)
+    hotel_location = serializers.CharField(
+        source="room.hotel.location.name", read_only=True
+    )
 
     class Meta:
         model = Booking
         fields = [
-            "id", "user_id", "room_id", "check_in", "check_out", "guests",
+            "id", "user_id", "room_id", "hotel_name", "hotel_location",
+            "check_in", "check_out", "guests",
             "status", "total_amount", "created_at",
         ]
         read_only_fields = fields

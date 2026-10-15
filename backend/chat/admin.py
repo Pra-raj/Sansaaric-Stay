@@ -1,7 +1,5 @@
 from django.contrib import admin
 from django.db.models import Count, OuterRef, Subquery
-from django.urls import reverse
-from django.utils.html import format_html
 
 from .models import Conversation, Message
 
@@ -34,7 +32,7 @@ class MessageInline(admin.TabularInline):
     can_delete = False
     show_change_link = False
     ordering = ("created_at",)
-    fields = ("created_at", "role", "is_human", "content", "citation_summary")
+    fields = ("created_at", "role", "content", "citation_summary")
     readonly_fields = fields
 
     def has_add_permission(self, request, obj=None):
@@ -71,17 +69,15 @@ class ConversationAdmin(admin.ModelAdmin):
         "title",
         "channel",
         "contact",
-        "is_human",
         "total_messages",
         "last_message",
         "updated_at",
-        "inbox_thread",
     )
-    list_filter = ("channel", "is_human", "created_at")
+    list_filter = ("channel", "created_at")
     search_fields = ("title", "email", "phone", "note", "user__username", "user__email")
     inlines = (MessageInline,)
     fieldsets = (
-        (None, {"fields": ("title", "channel", "user", "is_human", "inbox_thread")}),
+        (None, {"fields": ("title", "channel", "user")}),
         ("Contact", {"fields": ("email", "phone", "note")}),
         (
             "Transcript",
@@ -96,7 +92,6 @@ class ConversationAdmin(admin.ModelAdmin):
         ),
     )
     readonly_fields = (
-        "inbox_thread",
         "total_messages",
         "session_key",
         "created_at",
@@ -136,27 +131,18 @@ class ConversationAdmin(admin.ModelAdmin):
 
     last_message.short_description = "Last message"
 
-    def inbox_thread(self, obj):
-        return format_html(
-            '<a href="{}">Open inbox thread</a>',
-            reverse("docadmin_chat_thread", args=[obj.pk]),
-        )
-
-    inbox_thread.short_description = "Inbox"
-
 
 @admin.register(Message)
 class MessageAdmin(admin.ModelAdmin):
     """Read-only view of the transcript log, mirroring ChunkAdmin."""
 
-    list_display = ("conversation", "role", "preview", "is_human", "created_at")
-    list_filter = ("role", "is_human")
+    list_display = ("conversation", "role", "preview", "created_at")
+    list_filter = ("role",)
     search_fields = ("content", "conversation__title", "conversation__email")
     ordering = ("conversation", "created_at")
     readonly_fields = (
         "conversation",
         "role",
-        "is_human",
         "content",
         "citations",
         "created_at",

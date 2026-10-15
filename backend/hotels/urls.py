@@ -11,4 +11,10 @@ urlpatterns = [
         views.LocationDetailView.as_view(),
         name="location_detail",
     ),
+    path("api/admin/hotels", views.AdminHotelListView.as_view(), name="admin_hotel_list"),
+    path(
+        "api/admin/hotels/<int:hotel_id>",
+        views.AdminHotelDetailView.as_view(),
+        name="admin_hotel_detail",
+    ),
 ]

@@ -109,3 +109,67 @@ class IsStaffTests(TestCase):
 
     def test_rejects_anonymous(self):
         self.assertFalse(IsStaff().has_permission(SimpleNamespace(user=AnonymousUser()), None))
+
+
+class AdminActivityTests(TestCase):
+    def setUp(self):
+        from bookings.models import Booking
+        from chat.models import Conversation
+        from document_ingestion.models import ReferenceDocument
+        from hotels.models import Hotel, Location
+        from reviews.models import Review
+        from rooms.models import Room
+
+        self.staff = User.objects.create_user(username="actstaff", password="pw", is_staff=True)
+        self.guest = User.objects.create_user(
+            username="actguest", password="pw", first_name="Asha", email="asha@example.com"
+        )
+        location = Location.objects.create(name="Pokhara")
+        self.hotel = Hotel.objects.create(
+            owner=self.staff, name="Activity Inn", property_type="hotel",
+            location=location, status=Hotel.STATUS_PUBLISHED,
+        )
+        room = Room.objects.create(
+            hotel=self.hotel, name="Standard", base_price=1000,
+            max_guests=2, total_units=1,
+        )
+        self.booking = Booking.objects.create(
+            user=self.guest, room=room, check_in="2026-10-01",
+            check_out="2026-10-03", guests=1,
+        )
+        Review.objects.create(
+            booking=self.booking, user=self.guest, hotel=self.hotel,
+            rating=5, comment="Great stay",
+        )
+        Conversation.objects.create(user=self.guest, title="Booking enquiry")
+        ReferenceDocument.objects.create(
+            file_name="faq.pdf", file_type="pdf", uploaded_by=self.staff
+        )
+
+    def test_gating(self):
+        from rest_framework.test import APIClient
+
+        self.assertEqual(APIClient().get("/api/admin/activity").status_code, 403)
+
+    def test_feed_shape_and_order(self):
+        from rest_framework.test import APIClient
+
+        client = APIClient()
+        client.force_authenticate(user=self.staff)
+        rows = client.get("/api/admin/activity").json()
+        self.assertEqual(len(rows), 5)
+        for row in rows:
+            self.assertEqual(
+                set(row),
+                {"id", "at", "actor", "actorEmail", "category", "action", "target", "level"},
+            )
+        categories = {row["category"] for row in rows}
+        self.assertEqual(categories, {"hotel", "booking", "inbox", "document"})
+        stamps = [row["at"] for row in rows]
+        self.assertEqual(stamps, sorted(stamps, reverse=True))
+        booking_rows = [row for row in rows if row["action"] == "created booking"]
+        self.assertEqual(len(booking_rows), 1)
+        self.assertEqual(booking_rows[0]["actor"], "Asha")
+        self.assertEqual(booking_rows[0]["actorEmail"], "asha@example.com")
+        self.assertEqual(booking_rows[0]["target"], "Activity Inn")
+        self.assertTrue(all(row["level"] == "info" for row in rows))

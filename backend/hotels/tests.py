@@ -578,3 +578,118 @@ class LocationCrudApiTests(TestCase):
         resp = APIClient().delete(f"/api/locations/{self.pokhara.pk}")
         self.assertEqual(resp.status_code, 401)
 
+
+
+class AdminHotelEndpointTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.staff = User.objects.create_user(username="admstaff", password="pw", is_staff=True)
+        self.guest = User.objects.create_user(username="admguest", password="pw")
+        self.pokhara = Location.objects.create(name="Pokhara")
+        self.hotel = Hotel.objects.create(
+            owner=self.staff, name="Lakeside Retreat Pokhara", property_type="resort",
+            location=self.pokhara, description="Lake view",
+            status=Hotel.STATUS_PUBLISHED,
+        )
+
+    def test_anonymous_and_non_staff_forbidden(self):
+        self.assertEqual(APIClient().get("/api/admin/hotels").status_code, 403)
+        self.client.force_authenticate(user=self.guest)
+        self.assertEqual(self.client.get("/api/admin/hotels").status_code, 403)
+
+    def test_list_shape_and_mapping(self):
+        from rooms.models import Room
+
+        Room.objects.create(
+            hotel=self.hotel, name="Deluxe", base_price=Decimal("5000.00"),
+            max_guests=2, total_units=3,
+        )
+        self.client.force_authenticate(user=self.staff)
+        resp = self.client.get("/api/admin/hotels")
+        self.assertEqual(resp.status_code, 200)
+        (row,) = resp.json()
+        self.assertEqual(row["id"], str(self.hotel.pk))
+        self.assertEqual(row["name"], "Lakeside Retreat Pokhara")
+        self.assertEqual(row["location"], "Pokhara")
+        self.assertEqual(row["propertyType"], "resort")
+        self.assertEqual(row["startingPrice"], 5000.0)
+        self.assertEqual(row["amenities"], [])
+        self.assertEqual(row["status"], "Active")
+
+    def test_list_includes_drafts_as_inactive(self):
+        Hotel.objects.create(
+            owner=self.staff, name="Draft Inn", property_type="hotel",
+            location=self.pokhara, status=Hotel.STATUS_DRAFT,
+        )
+        self.client.force_authenticate(user=self.staff)
+        rows = {row["name"]: row["status"] for row in self.client.get("/api/admin/hotels").json()}
+        self.assertEqual(rows["Draft Inn"], "Inactive")
+
+    def test_create_and_detail_roundtrip(self):
+        self.client.force_authenticate(user=self.staff)
+        resp = self.client.post(
+            "/api/admin/hotels",
+            {"name": "New Inn", "location": "pokhara", "propertyType": "Homestay",
+             "description": "Cozy", "status": "Inactive"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 201)
+        body = resp.json()
+        self.assertEqual(body["status"], "Inactive")
+        self.assertEqual(body["propertyType"], "homestay")
+        hotel = Hotel.objects.get(name="New Inn")
+        self.assertEqual(hotel.status, Hotel.STATUS_ARCHIVED)
+        self.assertEqual(hotel.property_type, "homestay")
+        detail = self.client.get(f"/api/admin/hotels/{hotel.pk}")
+        self.assertEqual(detail.status_code, 200)
+        self.assertEqual(detail.json()["name"], "New Inn")
+        self.assertEqual(self.client.get("/api/admin/hotels/99999").status_code, 404)
+
+    def test_create_rejects_unknown_location_and_type(self):
+        self.client.force_authenticate(user=self.staff)
+        resp = self.client.post(
+            "/api/admin/hotels",
+            {"name": "Nowhere Inn", "location": "Atlantis", "propertyType": "Hotel"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 400)
+        resp = self.client.post(
+            "/api/admin/hotels",
+            {"name": "Weird Inn", "location": "Pokhara", "propertyType": "Castle"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 400)
+
+    def test_patch_toggles_status_only(self):
+        self.client.force_authenticate(user=self.staff)
+        resp = self.client.patch(
+            f"/api/admin/hotels/{self.hotel.pk}", {"status": "Inactive"}, format="json"
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["status"], "Inactive")
+        self.hotel.refresh_from_db()
+        self.assertEqual(self.hotel.status, Hotel.STATUS_ARCHIVED)
+        self.assertEqual(self.hotel.name, "Lakeside Retreat Pokhara")
+
+    def test_delete_guards_and_succeeds(self):
+        from bookings.models import Booking
+        from rooms.models import Room
+
+        room = Room.objects.create(
+            hotel=self.hotel, name="Standard", base_price=Decimal("1000.00"),
+            max_guests=2, total_units=1,
+        )
+        Booking.objects.create(
+            user=self.guest, room=room, check_in="2026-10-01",
+            check_out="2026-10-03", guests=1,
+        )
+        self.client.force_authenticate(user=self.staff)
+        resp = self.client.delete(f"/api/admin/hotels/{self.hotel.pk}")
+        self.assertEqual(resp.status_code, 409)
+        Booking.objects.all().delete()
+        resp = self.client.delete(f"/api/admin/hotels/{self.hotel.pk}")
+        self.assertEqual(resp.status_code, 409)
+        self.assertIn("rooms", resp.json()["detail"])
+        room.delete()
+        resp = self.client.delete(f"/api/admin/hotels/{self.hotel.pk}")
+        self.assertEqual(resp.status_code, 204)

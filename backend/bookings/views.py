@@ -7,15 +7,18 @@ from rest_framework.views import APIView
 
 from api.exceptions import Conflict
 from api.pagination import paginated_response
+from api.permissions import IsStaff
 from api.schema import paginated_response_schema
 from api.serializers import DetailErrorSerializer
 
 from .models import Booking
 from .serializers import (
+    AdminBookingSerializer,
     BookingCreateSerializer,
     BookingGuestPatchSerializer,
     BookingStaffPatchSerializer,
     BookingSummarySerializer,
+    RevenueSummarySerializer,
 )
 
 PAGINATION_PARAMETERS = [
@@ -173,3 +176,75 @@ class BookingDetailView(APIView):
             raise Conflict("Booking has a review.")
         booking.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+def _admin_booking_queryset():
+    return Booking.objects.select_related(
+        "user", "room", "room__hotel", "room__hotel__location"
+    ).order_by("-created_at")
+
+
+class AdminBookingListView(APIView):
+    """Every booking for the admin dashboard, newest first (not paginated)."""
+
+    permission_classes = [IsStaff]
+
+    @extend_schema(
+        methods=["GET"],
+        operation_id="admin_bookings_list",
+        tags=["Admin / Bookings"],
+        parameters=[
+            OpenApiParameter(
+                "status",
+                str,
+                OpenApiParameter.QUERY,
+                description="Filter by backend status (pending, confirmed, cancelled, completed).",
+            ),
+        ],
+        responses={200: AdminBookingSerializer(many=True), 403: DetailErrorSerializer},
+    )
+    def get(self, request):
+        queryset = _admin_booking_queryset()
+        status_filter = (request.query_params.get("status") or "").strip().lower()
+        if status_filter:
+            queryset = queryset.filter(status=status_filter)
+        return Response(AdminBookingSerializer(queryset, many=True).data)
+
+
+class AdminRevenueView(APIView):
+    """Revenue totals grouped by check-in month, mirroring the dashboard math:
+    only non-cancelled bookings count as paid."""
+
+    permission_classes = [IsStaff]
+
+    @extend_schema(
+        methods=["GET"],
+        operation_id="admin_revenue",
+        tags=["Admin / Bookings"],
+        responses={200: RevenueSummarySerializer, 403: DetailErrorSerializer},
+    )
+    def get(self, request):
+        paid = _admin_booking_queryset().exclude(status=Booking.STATUS_CANCELLED)
+        months: dict[str, dict] = {}
+        total_revenue = 0.0
+        for booking in paid:
+            key = booking.check_in.strftime("%Y-%m")
+            row = months.setdefault(key, {"revenue": 0.0, "bookings": 0})
+            row["revenue"] += float(booking.total_amount)
+            row["bookings"] += 1
+            total_revenue += float(booking.total_amount)
+        total_bookings = paid.count()
+        cancelled_bookings = Booking.objects.filter(
+            status=Booking.STATUS_CANCELLED
+        ).count()
+        return Response(
+            {
+                "totalRevenue": total_revenue,
+                "totalBookings": total_bookings,
+                "cancelledBookings": cancelled_bookings,
+                "averageBooking": total_revenue / total_bookings if total_bookings else 0,
+                "months": [
+                    {"month": month, **months[month]} for month in sorted(months)
+                ],
+            }
+        )

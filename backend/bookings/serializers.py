@@ -52,3 +52,72 @@ class BookingStaffPatchSerializer(StayDatesMixin, serializers.ModelSerializer):
     class Meta:
         model = Booking
         fields = ["check_in", "check_out", "guests", "status", "total_amount"]
+
+
+# ----- Admin dashboard shapes -------------------------------------------------
+# CamelCase display rows for the admin UI (see frontend/src/types), emitted
+# directly like the inbox serializers do.
+
+
+def admin_booking_status(booking: Booking) -> str:
+    if booking.status == Booking.STATUS_COMPLETED:
+        return "Completed"
+    if booking.status == Booking.STATUS_CANCELLED:
+        return "Cancelled"
+    return "Upcoming"
+
+
+def guest_display_name(user) -> str:
+    if user is None:
+        return "Guest"
+    return user.get_full_name() or user.email or user.username or "Guest"
+
+
+class AdminBookingSerializer(serializers.ModelSerializer):
+    id = serializers.CharField(read_only=True)
+    guestName = serializers.SerializerMethodField()
+    guestEmail = serializers.SerializerMethodField()
+    hotelName = serializers.CharField(source="room.hotel.name", read_only=True)
+    location = serializers.CharField(
+        source="room.hotel.location.name", read_only=True
+    )
+    checkIn = serializers.DateField(source="check_in", read_only=True)
+    checkOut = serializers.DateField(source="check_out", read_only=True)
+    totalAmount = serializers.SerializerMethodField()
+    bookedAt = serializers.DateTimeField(source="created_at", read_only=True)
+    status = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Booking
+        fields = [
+            "id", "guestName", "guestEmail", "hotelName", "location",
+            "checkIn", "checkOut", "guests", "status", "totalAmount",
+            "bookedAt",
+        ]
+        read_only_fields = fields
+
+    def get_guestName(self, booking: Booking) -> str:
+        return guest_display_name(booking.user)
+
+    def get_guestEmail(self, booking: Booking) -> str:
+        return booking.user.email if booking.user else ""
+
+    def get_totalAmount(self, booking: Booking) -> float:
+        return float(booking.total_amount)
+
+    def get_status(self, booking: Booking) -> str:
+        return admin_booking_status(booking)
+
+
+class RevenueMonthSerializer(serializers.Serializer):
+    month = serializers.CharField()
+    revenue = serializers.FloatField()
+    bookings = serializers.IntegerField()
+
+
+class RevenueSummarySerializer(serializers.Serializer):
+    totalRevenue = serializers.FloatField()
+    totalBookings = serializers.IntegerField()
+    cancelledBookings = serializers.IntegerField()
+    averageBooking = serializers.FloatField()
+    months = RevenueMonthSerializer(many=True)

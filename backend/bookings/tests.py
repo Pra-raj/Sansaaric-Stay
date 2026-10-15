@@ -257,3 +257,92 @@ class BookingCrudApiTests(TestCase):
         resp = self.auth(self.staff).delete(f"/api/bookings/{self.booking.id}")
         self.assertEqual(resp.status_code, 409)
         self.assertIn("detail", resp.json())
+
+
+class AdminBookingEndpointTests(TestCase):
+    def setUp(self):
+        self.staff = User.objects.create_user(username="admstaff", password="pw", is_staff=True)
+        self.guest = User.objects.create_user(
+            username="admguest", password="pw", first_name="Asha", last_name="Guest",
+            email="asha@example.com",
+        )
+        self.other = User.objects.create_user(username="admother", password="pw")
+        self.owner = User.objects.create_user(username="admowner", password="pw")
+        self.location = Location.objects.create(name="Pokhara")
+        self.hotel = Hotel.objects.create(
+            owner=self.owner, name="Booking Inn", property_type="hotel",
+            location=self.location, status=Hotel.STATUS_PUBLISHED,
+        )
+        self.room = Room.objects.create(
+            hotel=self.hotel, name="Standard Twin", base_price=Decimal("3000.00"),
+            max_guests=2, total_units=4,
+        )
+        self.pending = Booking.objects.create(
+            user=self.guest, room=self.room, check_in="2026-10-01",
+            check_out="2026-10-05", guests=2, status=Booking.STATUS_PENDING,
+        )
+        self.done = Booking.objects.create(
+            user=self.other, room=self.room, check_in="2026-09-01",
+            check_out="2026-09-03", guests=1, status=Booking.STATUS_COMPLETED,
+            total_amount=Decimal("6000.00"),
+        )
+
+    def auth(self, user):
+        client = APIClient()
+        client.force_authenticate(user=user)
+        return client
+
+    def test_gating(self):
+        self.assertEqual(APIClient().get("/api/admin/bookings").status_code, 403)
+        self.assertEqual(self.auth(self.guest).get("/api/admin/bookings").status_code, 403)
+        self.assertEqual(APIClient().get("/api/admin/revenue").status_code, 403)
+
+    def test_list_shows_all_with_shapes(self):
+        rows = self.auth(self.staff).get("/api/admin/bookings").json()
+        self.assertEqual(len(rows), 2)
+        by_id = {row["id"]: row for row in rows}
+        pending = by_id[str(self.pending.id)]
+        self.assertEqual(pending["guestName"], "Asha Guest")
+        self.assertEqual(pending["guestEmail"], "asha@example.com")
+        self.assertEqual(pending["hotelName"], "Booking Inn")
+        self.assertEqual(pending["location"], "Pokhara")
+        self.assertEqual(pending["checkIn"], "2026-10-01")
+        self.assertEqual(pending["status"], "Upcoming")
+        self.assertEqual(pending["totalAmount"], 0.0)
+        self.assertIn("bookedAt", pending)
+        self.assertEqual(by_id[str(self.done.id)]["status"], "Completed")
+
+    def test_status_filter(self):
+        rows = self.auth(self.staff).get("/api/admin/bookings?status=completed").json()
+        self.assertEqual([row["id"] for row in rows], [str(self.done.id)])
+
+    def test_revenue_math(self):
+        self.pending.total_amount = Decimal("8000.00")
+        self.pending.save(update_fields=["total_amount"])
+        Booking.objects.create(
+            user=self.guest, room=self.room, check_in="2026-10-10",
+            check_out="2026-10-12", guests=1, status=Booking.STATUS_CANCELLED,
+            total_amount=Decimal("9999.00"),
+        )
+        body = self.auth(self.staff).get("/api/admin/revenue").json()
+        # Pending counts as paid (only cancelled is excluded), like the mock.
+        self.assertEqual(body["totalRevenue"], 14000.0)
+        self.assertEqual(body["totalBookings"], 2)
+        self.assertEqual(body["cancelledBookings"], 1)
+        self.assertEqual(body["averageBooking"], 7000.0)
+        self.assertEqual(
+            body["months"],
+            [
+                {"month": "2026-09", "revenue": 6000.0, "bookings": 1},
+                {"month": "2026-10", "revenue": 8000.0, "bookings": 1},
+            ],
+        )
+
+    def test_revenue_empty(self):
+        Booking.objects.all().delete()
+        body = self.auth(self.staff).get("/api/admin/revenue").json()
+        self.assertEqual(
+            body,
+            {"totalRevenue": 0.0, "totalBookings": 0, "cancelledBookings": 0,
+             "averageBooking": 0, "months": []},
+        )

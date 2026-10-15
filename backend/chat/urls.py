@@ -9,6 +9,7 @@ urlpatterns = [
     path("api/chat/events", views.api_chat_events, name="api_chat_events"),
     path("api/admin/inbox/events", views.api_admin_inbox_events, name="admin_inbox_events"),
     path("healthz", views.health_check, name="health_check"),
+    path("health", views.health_check, name="health_check_alias"),
     path(
         "api/admin/inbox",
         views.InboxListView.as_view(),

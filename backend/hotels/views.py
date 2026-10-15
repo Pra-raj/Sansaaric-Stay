@@ -1,6 +1,6 @@
 import logging
 
-from django.db.models import Case, IntegerField, Value, When
+from django.db.models import Case, IntegerField, Min, Value, When
 from django.shortcuts import get_object_or_404
 from drf_spectacular.utils import OpenApiParameter, extend_schema
 from rest_framework import status
@@ -10,13 +10,20 @@ from rest_framework.views import APIView
 
 from api.exceptions import Conflict
 from api.pagination import paginated_response
-from api.permissions import IsStaffOrReadOnly, hotel_owner_or_staff, is_hotel_owner
+from api.permissions import (
+    IsStaff,
+    IsStaffOrReadOnly,
+    hotel_owner_or_staff,
+    is_hotel_owner,
+)
 from api.schema import paginated_response_schema
 from api.serializers import DetailErrorSerializer
 from api.visibility import visible_hotel_list, visible_hotel_or_404
 
-from .models import Location
+from .models import Hotel, Location
 from .serializers import (
+    AdminHotelSerializer,
+    AdminHotelWriteSerializer,
     HotelStaffCreateSerializer,
     HotelSummarySerializer,
     HotelWriteSerializer,
@@ -314,4 +321,107 @@ class LocationDetailView(APIView):
         if location.hotels.exists():
             raise Conflict("Location has hotels.")
         location.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+def _admin_hotel_queryset():
+    """Every hotel with its cheapest-room price, newest first for the admin."""
+    return (
+        Hotel.objects.select_related("location")
+        .annotate(min_price=Min("rooms__base_price"))
+        .order_by("-created_at")
+    )
+
+
+class AdminHotelListView(APIView):
+    """Staff catalogue management in the admin dashboard's flat row shape."""
+
+    permission_classes = [IsStaff]
+
+    @extend_schema(
+        methods=["GET"],
+        operation_id="admin_hotels_list",
+        tags=["Admin / Hotels"],
+        responses={200: AdminHotelSerializer(many=True), 403: DetailErrorSerializer},
+    )
+    def get(self, request):
+        return Response(AdminHotelSerializer(_admin_hotel_queryset(), many=True).data)
+
+    @extend_schema(
+        methods=["POST"],
+        operation_id="admin_hotels_create",
+        tags=["Admin / Hotels"],
+        request=AdminHotelWriteSerializer,
+        responses={
+            201: AdminHotelSerializer,
+            400: FIELD_ERRORS,
+            403: DetailErrorSerializer,
+        },
+    )
+    def post(self, request):
+        serializer = AdminHotelWriteSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        # Admin-created catalogue entries are owned by the staff member filing
+        # them; owner reassignment stays in the Django admin.
+        hotel = Hotel.objects.create(owner=request.user, **serializer.to_hotel_kwargs())
+        hotel = _admin_hotel_queryset().get(pk=hotel.pk)
+        return Response(AdminHotelSerializer(hotel).data, status=status.HTTP_201_CREATED)
+
+
+class AdminHotelDetailView(APIView):
+    permission_classes = [IsStaff]
+
+    @extend_schema(
+        methods=["GET"],
+        operation_id="admin_hotels_retrieve",
+        tags=["Admin / Hotels"],
+        responses={200: AdminHotelSerializer, 403: DetailErrorSerializer, 404: DetailErrorSerializer},
+    )
+    def get(self, request, hotel_id):
+        hotel = get_object_or_404(_admin_hotel_queryset(), pk=hotel_id)
+        return Response(AdminHotelSerializer(hotel).data)
+
+    @extend_schema(
+        methods=["PATCH"],
+        operation_id="admin_hotels_update",
+        tags=["Admin / Hotels"],
+        request=AdminHotelWriteSerializer,
+        responses={
+            200: AdminHotelSerializer,
+            400: FIELD_ERRORS,
+            403: DetailErrorSerializer,
+            404: DetailErrorSerializer,
+        },
+    )
+    def patch(self, request, hotel_id):
+        hotel = get_object_or_404(Hotel.objects.select_related("location"), pk=hotel_id)
+        serializer = AdminHotelWriteSerializer(data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        for field, value in serializer.to_hotel_kwargs().items():
+            setattr(hotel, field, value)
+        hotel.save()
+        hotel = _admin_hotel_queryset().get(pk=hotel.pk)
+        return Response(AdminHotelSerializer(hotel).data)
+
+    @extend_schema(
+        methods=["DELETE"],
+        operation_id="admin_hotels_destroy",
+        tags=["Admin / Hotels"],
+        request=None,
+        responses={
+            204: None,
+            403: DetailErrorSerializer,
+            404: DetailErrorSerializer,
+            409: DetailErrorSerializer,
+        },
+    )
+    def delete(self, request, hotel_id):
+        hotel = get_object_or_404(Hotel, pk=hotel_id)
+        if hotel.rooms.filter(bookings__isnull=False).exists():
+            raise Conflict("Hotel has bookings.")
+        if hotel.rooms.exists():
+            raise Conflict("Hotel has rooms.")
+        if hotel.reviews.exists():
+            raise Conflict("Hotel has reviews.")
+        hotel.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)

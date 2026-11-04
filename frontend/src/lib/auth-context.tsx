@@ -12,6 +12,7 @@ import * as auth from "./auth";
 import type { UserRole } from "@/types";
 
 export interface AuthUser {
+  id?: string;
   name: string;
   email: string;
   initials: string;
@@ -26,7 +27,10 @@ interface AuthContextValue {
   isAdmin: boolean;
   user: AuthUser | null;
   login: (email: string, password: string) => Promise<void>;
-  signup: (name: string, email: string, password: string) => Promise<void>;
+  signup: (name: string, email: string, password: string) => Promise<auth.SignupResult>;
+  /** Confirm the 6-digit signup code, then sign the new account in. */
+  verifySignup: (email: string, code: string) => Promise<void>;
+  resendSignupCode: (email: string) => Promise<string>;
   logOut: () => void;
   updateProfile: (patch: Partial<AuthUser>) => void;
 }
@@ -70,10 +74,19 @@ export default function AuthProvider({ children }: { children: ReactNode }) {
         setUser(fresh);
       },
       signup: async (name, email, password) => {
-        await auth.signUp(name, email, password);
+        const result = await auth.signUp(name, email, password);
+        if (!result.requiresVerification) {
+          const fresh = await auth.fetchCurrentUser();
+          setUser(fresh);
+        }
+        return result;
+      },
+      verifySignup: async (email, code) => {
+        await auth.verifySignupCode(email, code);
         const fresh = await auth.fetchCurrentUser();
         setUser(fresh);
       },
+      resendSignupCode: (email) => auth.resendSignupCode(email),
       logOut: () => {
         void auth.revokeSession();
         auth.clearSession();

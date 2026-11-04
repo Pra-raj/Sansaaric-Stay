@@ -4,6 +4,7 @@ import { useState, type ChangeEvent } from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/Button";
 import Input from "@/components/ui/Input";
+import PasswordInput from "@/components/ui/PasswordInput";
 import { Avatar } from "@/components/ui/Avatar";
 import { AccountSidebar } from "./AccountSidebar";
 import { useAuth } from "@/lib/auth-context";
@@ -178,26 +179,23 @@ export function SettingsView() {
           <section className="rounded-card border border-border/10 bg-surface p-5">
             <h2 className="mb-4 font-semibold">Change password</h2>
             <form onSubmit={handleChangePassword} className="space-y-4">
-              <Input
+              <PasswordInput
                 id="settings-current-password"
                 label="Current password"
-                type="password"
                 value={currentPassword}
                 onChange={(e) => setCurrentPassword(e.target.value)}
                 required
               />
-              <Input
+              <PasswordInput
                 id="settings-new-password"
                 label={`New password (min. ${MIN_PASSWORD_LEN} characters)`}
-                type="password"
                 value={newPassword}
                 onChange={(e) => setNewPassword(e.target.value)}
                 required
               />
-              <Input
+              <PasswordInput
                 id="settings-confirm-password"
                 label="Confirm new password"
-                type="password"
                 value={confirmPassword}
                 onChange={(e) => setConfirmPassword(e.target.value)}
                 required
@@ -266,10 +264,9 @@ export function SettingsView() {
                 }}
                 className="space-y-3"
               >
-                <Input
+                <PasswordInput
                   id="delete-account-password"
                   label="Enter your password to confirm"
-                  type="password"
                   placeholder="••••••••"
                   value={deletePassword}
                   onChange={(e) => setDeletePassword(e.target.value)}

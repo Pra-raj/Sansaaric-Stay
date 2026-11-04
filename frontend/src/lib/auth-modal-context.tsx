@@ -8,13 +8,14 @@ import {
   useState,
 } from "react";
 
-type panel = "login" | "signup";
+type panel = "login" | "signup" | "verify" | "forgot";
 
 interface AuthModalContextValue {
   isOpen: boolean;
   panel: panel;
   openLogin: () => void;
   openSignup: () => void;
+  openForgot: () => void;
   switchPanel: (panel: panel) => void;
   close: () => void;
 }
@@ -37,6 +38,10 @@ export function AuthModalProvider({ children }: { children: ReactNode }) {
       },
       openSignup: () => {
         setPanel("signup");
+        setIsOpen(true);
+      },
+      openForgot: () => {
+        setPanel("forgot");
         setIsOpen(true);
       },
       switchPanel: (p: panel) => setPanel(p),

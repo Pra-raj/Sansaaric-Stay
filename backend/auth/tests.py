@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -12,15 +13,16 @@ import yaml
 from cryptography.hazmat.primitives.asymmetric import ec
 from django.conf import settings
 from django.contrib.auth import get_user_model
+from django.core import mail
 from django.core.cache import cache
 from django.db import IntegrityError
-from django.test import SimpleTestCase, TestCase
+from django.test import SimpleTestCase, TestCase, override_settings
 from rest_framework import exceptions
 from rest_framework.test import APIClient, APIRequestFactory
 
-from auth import local
+from auth import local, verification
 from auth.authentication import LocalJWTAuthentication, SupabaseJWTAuthentication
-from auth.models import Profile
+from auth.models import EmailVerificationCode, Profile
 from auth.sync import sync_user
 
 User = get_user_model()
@@ -295,6 +297,7 @@ class LocalJWTAuthenticationTest(TestCase):
             self._auth().authenticate(self._request(token))
 
 
+@override_settings(EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend")
 class SignupLoginViewTest(TestCase):
     def setUp(self):
         self.client = APIClient()
@@ -302,50 +305,149 @@ class SignupLoginViewTest(TestCase):
         # 127.0.0.1, so without a reset the history bleeds across tests.
         cache.clear()
 
-    def test_signup_creates_user_and_returns_session(self):
-        response = self.client.post(
+    def _signup(self, email="jane@example.com", password="Sunrise-Lodge-7", name="Jane Doe"):
+        return self.client.post(
             "/api/auth/signup",
-            {"email": "jane@example.com", "password": "Sunrise-Lodge-7", "full_name": "Jane Doe"},
+            {"email": email, "password": password, "full_name": name},
             format="json",
         )
+
+    @staticmethod
+    def _code_from_email(message):
+        match = re.search(r"\b(\d{6})\b", message.body)
+        if match is None:
+            raise AssertionError(f"no 6-digit code in email body: {message.body!r}")
+        return match.group(1)
+
+    def test_signup_creates_unverified_user_without_session(self):
+        response = self._signup()
         self.assertEqual(response.status_code, 201)
         body = response.json()
         self.assertEqual(body["user"]["email"], "jane@example.com")
-        self.assertTrue(body["user"]["email_confirmed"])
+        self.assertFalse(body["user"]["email_confirmed"])
+        self.assertIsNone(body["session"])
         user = User.objects.get(email="jane@example.com")
-        self.assertTrue(Profile.objects.filter(user=user).exists())
-        claims = local.decode_access(body["session"]["access_token"])
-        self.assertEqual(claims["sub"], str(user.pk))
+        self.assertFalse(user.profile.email_verified)
+        # The confirmation code is emailed, never returned in the response.
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertEqual(mail.outbox[0].to, ["jane@example.com"])
+        self.assertNotIn(self._code_from_email(mail.outbox[0]), json.dumps(body))
 
     def test_signup_without_name_uses_empty_first_name(self):
-        response = self.client.post(
-            "/api/auth/signup",
-            {"email": "no-name@example.com", "password": "Sunrise-Lodge-7"},
-            format="json",
-        )
+        response = self._signup(email="no-name@example.com", name="")
         self.assertEqual(response.status_code, 201)
         self.assertEqual(User.objects.get(email="no-name@example.com").first_name, "")
 
     def test_signup_taken_email_returns_409(self):
         User.objects.create_user(username="taken", email="taken@example.com", password="pw")
-        response = self.client.post(
-            "/api/auth/signup",
-            {"email": "taken@example.com", "password": "Sunrise-Lodge-7"},
-            format="json",
-        )
+        response = self._signup(email="taken@example.com")
         self.assertEqual(response.status_code, 409)
         self.assertEqual(response.json()["error"], "user_already_registered")
 
     def test_signup_weak_password_rejected(self):
         # A2: AUTH_PASSWORD_VALIDATORS run server-side, so a password the UI
         # would reject never creates an account.
+        response = self._signup(email="weak@example.com", password="s3cret")
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(User.objects.filter(email="weak@example.com").exists())
+
+    def test_verify_code_confirms_email_and_returns_session(self):
+        self._signup()
+        code = self._code_from_email(mail.outbox[0])
         response = self.client.post(
-            "/api/auth/signup",
-            {"email": "weak@example.com", "password": "s3cret"},
+            "/api/auth/signup/verify",
+            {"email": "jane@example.com", "code": code},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertTrue(body["user"]["email_confirmed"])
+        claims = local.decode_access(body["session"]["access_token"])
+        user = User.objects.get(email="jane@example.com")
+        self.assertEqual(claims["sub"], str(user.pk))
+        user.profile.refresh_from_db()
+        self.assertTrue(user.profile.email_verified)
+
+    def test_login_blocked_until_email_verified(self):
+        self._signup()
+        blocked = self.client.post(
+            "/api/auth/login",
+            {"email": "jane@example.com", "password": "Sunrise-Lodge-7"},
+            format="json",
+        )
+        self.assertEqual(blocked.status_code, 403)
+        self.assertEqual(blocked.json()["error"], "email_not_verified")
+
+        code = self._code_from_email(mail.outbox[0])
+        self.client.post(
+            "/api/auth/signup/verify",
+            {"email": "jane@example.com", "code": code},
+            format="json",
+        )
+        allowed = self.client.post(
+            "/api/auth/login",
+            {"email": "jane@example.com", "password": "Sunrise-Lodge-7"},
+            format="json",
+        )
+        self.assertEqual(allowed.status_code, 200)
+
+    def test_verify_rejects_wrong_code_and_keeps_account_unverified(self):
+        self._signup()
+        correct = self._code_from_email(mail.outbox[0])
+        wrong = "000000" if correct != "000000" else "111111"
+        response = self.client.post(
+            "/api/auth/signup/verify",
+            {"email": "jane@example.com", "code": wrong},
             format="json",
         )
         self.assertEqual(response.status_code, 400)
-        self.assertFalse(User.objects.filter(email="weak@example.com").exists())
+        self.assertEqual(response.json()["error"], "invalid_code")
+        self.assertFalse(User.objects.get(email="jane@example.com").profile.email_verified)
+
+    def test_verify_unknown_email_looks_like_a_bad_code(self):
+        response = self.client.post(
+            "/api/auth/signup/verify",
+            {"email": "nobody@example.com", "code": "123456"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"], "invalid_code")
+
+    def test_verify_requires_six_digits(self):
+        response = self.client.post(
+            "/api/auth/signup/verify",
+            {"email": "jane@example.com", "code": "12ab"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 400)
+
+    def test_resend_sends_a_new_code_after_cooldown(self):
+        self._signup()
+        first_code = self._code_from_email(mail.outbox[0])
+        # Immediate resend is silently swallowed by the cooldown.
+        self.client.post(
+            "/api/auth/signup/resend", {"email": "jane@example.com"}, format="json"
+        )
+        self.assertEqual(len(mail.outbox), 1)
+
+        with override_settings(EMAIL_VERIFICATION_RESEND_SECONDS=0):
+            response = self.client.post(
+                "/api/auth/signup/resend", {"email": "jane@example.com"}, format="json"
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(mail.outbox), 2)
+        self.assertNotEqual(self._code_from_email(mail.outbox[1]), first_code)
+
+    def test_resend_never_reveals_whether_an_account_exists(self):
+        known = self._signup()
+        self.assertEqual(known.status_code, 201)
+        unknown = self.client.post(
+            "/api/auth/signup/resend", {"email": "nobody@example.com"}, format="json"
+        )
+        self.assertEqual(unknown.status_code, 200)
+        self.assertEqual(unknown.json()["detail"], self.client.post(
+            "/api/auth/signup/resend", {"email": "jane@example.com"}, format="json"
+        ).json()["detail"])
 
     def test_login_by_email_returns_access_token(self):
         User.objects.create_user(
@@ -405,6 +507,185 @@ class SignupLoginViewTest(TestCase):
         ]
         self.assertEqual(statuses[-1], 429)
         self.assertIn(401, statuses)  # earlier attempts still reach the view
+
+
+@override_settings(EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend")
+class EmailVerificationCodeTest(TestCase):
+    def setUp(self):
+        cache.clear()
+        self.user = User.objects.create_user(
+            username="verify.me", email="verify.me@example.com", password="Sunrise-Lodge-7"
+        )
+        Profile.objects.create(
+            user=self.user, supabase_uid=str(uuid.uuid4()), email_verified=False
+        )
+
+    def test_issue_and_verify_marks_profile_verified(self):
+        code = verification.issue_code(self.user)
+        self.assertRegex(code, r"^\d{6}$")
+        ok, reason = verification.verify_code(self.user, code)
+        self.assertTrue(ok)
+        self.assertIsNone(reason)
+        self.user.profile.refresh_from_db()
+        self.assertTrue(self.user.profile.email_verified)
+
+    def test_code_is_single_use(self):
+        code = verification.issue_code(self.user)
+        self.assertTrue(verification.verify_code(self.user, code)[0])
+        ok, reason = verification.verify_code(self.user, code)
+        self.assertFalse(ok)
+        self.assertEqual(reason, "missing")
+
+    def test_wrong_guesses_are_capped(self):
+        code = verification.issue_code(self.user)
+        wrong = "000000" if code != "000000" else "111111"
+        with override_settings(EMAIL_VERIFICATION_MAX_ATTEMPTS=2):
+            self.assertEqual(verification.verify_code(self.user, wrong)[1], "invalid")
+            self.assertEqual(verification.verify_code(self.user, wrong)[1], "invalid")
+            ok, reason = verification.verify_code(self.user, code)
+        self.assertFalse(ok)
+        self.assertEqual(reason, "too_many")
+
+    def test_expired_code_is_rejected(self):
+        code = verification.issue_code(self.user)
+        with override_settings(EMAIL_VERIFICATION_TIMEOUT_MINUTES=0):
+            ok, reason = verification.verify_code(self.user, code)
+        self.assertFalse(ok)
+        self.assertEqual(reason, "expired")
+
+    def test_resend_cooldown_counts_down(self):
+        verification.issue_code(self.user)
+        self.assertGreater(verification.seconds_until_resend(self.user), 0)
+        with override_settings(EMAIL_VERIFICATION_RESEND_SECONDS=0):
+            self.assertEqual(verification.seconds_until_resend(self.user), 0)
+
+    def test_issue_retires_previous_code(self):
+        first = verification.issue_code(self.user)
+        second = verification.issue_code(self.user)
+        self.assertEqual(EmailVerificationCode.objects.filter(user=self.user).count(), 1)
+        self.assertFalse(verification.verify_code(self.user, first)[0])
+        self.assertTrue(verification.verify_code(self.user, second)[0])
+
+    def test_only_a_hash_is_stored(self):
+        code = verification.issue_code(self.user)
+        record = EmailVerificationCode.objects.get(user=self.user)
+        self.assertNotIn(code, record.code_hash)
+        self.assertEqual(len(record.code_hash), 64)
+
+    def test_accounts_without_profile_are_treated_as_verified(self):
+        # createsuperuser / legacy accounts are not part of the signup flow.
+        plain = User.objects.create_user(username="plain", email="plain@example.com", password="pw")
+        self.assertTrue(verification.email_is_verified(plain))
+
+
+@override_settings(EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend")
+class PasswordResetViewTest(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        # Shares the A1 `auth` throttle bucket (10/min per IP) above.
+        cache.clear()
+        self.user = User.objects.create_user(
+            username="demo.admin",
+            email="demo.admin@sansaaric.com",
+            password="SuperAdmin@123",
+        )
+
+    def _request_reset(self, email=None):
+        return self.client.post(
+            "/api/auth/password-reset",
+            {"email": email or self.user.email},
+            format="json",
+        )
+
+    def test_request_emails_reset_link(self):
+        response = self._request_reset()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertEqual(mail.outbox[0].to, [self.user.email])
+        self.assertIn("/reset-password?uid=", mail.outbox[0].body)
+        self.assertIn("token=", mail.outbox[0].body)
+        # The link must never contain the stored password hash.
+        self.assertNotIn(self.user.password, mail.outbox[0].body)
+
+    def test_request_for_unknown_email_looks_identical_and_sends_nothing(self):
+        response = self._request_reset("nobody@example.com")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("If an account exists", response.json()["detail"])
+        self.assertEqual(len(mail.outbox), 0)
+
+    def test_confirm_with_email_token_changes_password(self):
+        self._request_reset()
+        uid = local.password_reset_uid(self.user)
+        token = local.password_reset_token(self.user)
+        response = self.client.post(
+            "/api/auth/password-reset/confirm",
+            {"uid": uid, "token": token, "password": "NewSunrise-9"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 200)
+        self.user.refresh_from_db()
+        self.assertTrue(self.user.check_password("NewSunrise-9"))
+
+    def test_confirm_marks_a_pending_signup_as_verified(self):
+        # Opening the emailed reset link proves control of the address.
+        Profile.objects.create(
+            user=self.user, supabase_uid=str(uuid.uuid4()), email_verified=False
+        )
+        uid = local.password_reset_uid(self.user)
+        token = local.password_reset_token(self.user)
+        response = self.client.post(
+            "/api/auth/password-reset/confirm",
+            {"uid": uid, "token": token, "password": "NewSunrise-9"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 200)
+        self.user.profile.refresh_from_db()
+        self.assertTrue(self.user.profile.email_verified)
+
+    def test_confirm_token_cannot_be_reused(self):
+        uid = local.password_reset_uid(self.user)
+        token = local.password_reset_token(self.user)
+        body = {"uid": uid, "token": token, "password": "NewSunrise-9"}
+        first = self.client.post("/api/auth/password-reset/confirm", body, format="json")
+        self.assertEqual(first.status_code, 200)
+        second = self.client.post("/api/auth/password-reset/confirm", body, format="json")
+        self.assertEqual(second.status_code, 400)
+        self.assertEqual(second.json()["error"], "invalid_token")
+
+    def test_confirm_rejects_bad_token(self):
+        uid = local.password_reset_uid(self.user)
+        response = self.client.post(
+            "/api/auth/password-reset/confirm",
+            {"uid": uid, "token": "not-a-token", "password": "NewSunrise-9"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 400)
+        self.user.refresh_from_db()
+        self.assertTrue(self.user.check_password("SuperAdmin@123"))
+
+    def test_confirm_rejects_malformed_uid(self):
+        response = self.client.post(
+            "/api/auth/password-reset/confirm",
+            {"uid": "!!!", "token": "whatever", "password": "NewSunrise-9"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 400)
+
+    def test_confirm_runs_password_validators(self):
+        uid = local.password_reset_uid(self.user)
+        token = local.password_reset_token(self.user)
+        response = self.client.post(
+            "/api/auth/password-reset/confirm",
+            {"uid": uid, "token": token, "password": "s3cret"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 400)
+        self.user.refresh_from_db()
+        self.assertTrue(self.user.check_password("SuperAdmin@123"))
+
+    def test_scope_returns_429_after_n_attempts(self):
+        statuses = [self._request_reset("nobody@example.com").status_code for _ in range(11)]
+        self.assertEqual(statuses[-1], 429)
 
 
 class RefreshLogoutMeViewTest(TestCase):

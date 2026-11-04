@@ -10,6 +10,8 @@ export interface Filters {
 }
 
 const propertyTypeOptions = ["Hotel", "Resort", "Homestay"];
+export const MIN_PRICE = 250;
+export const MAX_PRICE = 100000;
 const ratingOptions = [4.5, 4.0, 3.5];
 
 export function FilterPanel({
@@ -31,18 +33,22 @@ export function FilterPanel({
 
   const minNum = Number(filters.minPrice);
   const maxNum = Number(filters.maxPrice);
-  const rangeInvalid =
-    (filters.minPrice !== "" && (isNaN(minNum) || minNum < 0)) ||
-    (filters.maxPrice !== "" && (isNaN(maxNum) || maxNum < 0)) ||
-    (filters.minPrice !== "" &&
-      filters.maxPrice !== "" &&
-      minNum > maxNum);
-  const rangeError = rangeInvalid
-    ? "Enter a valid range (min below max, no negatives)."
-    : "";
+  // Digits only, never above NPR 1,00,000 (typing a bigger number is cut back).
+  const cleanPrice = (v: string) => {
+    const digits = v.replace(/[^\d]/g, "").replace(/^0+(?=\d)/, "");
+    return digits !== "" && Number(digits) > MAX_PRICE ? String(MAX_PRICE) : digits;
+  };
+  let rangeError = "";
+  if (filters.minPrice !== "" && minNum < MIN_PRICE) {
+    rangeError = `Minimum price is NPR ${MIN_PRICE}.`;
+  } else if (filters.maxPrice !== "" && maxNum < MIN_PRICE) {
+    rangeError = `Maximum price must be at least NPR ${MIN_PRICE}.`;
+  } else if (filters.minPrice !== "" && filters.maxPrice !== "" && minNum > maxNum) {
+    rangeError = "Minimum must be lower than maximum.";
+  }
 
   return (
-    <aside className="w-full shrink-0 space-y-6 rounded-card border border-black/5 bg-surface p-5 sm:w-64">
+    <aside className="w-full space-y-6 rounded-card border border-black/5 bg-surface p-5">
       <div>
         <h3 className="mb-3 text-sm font-semibold">Location</h3>
         <Input
@@ -63,12 +69,14 @@ export function FilterPanel({
             <Input
               id="filter-min"
               label="Min"
-              type="number"
-              min={0}
-              placeholder="1000"
+              type="text"
+              inputMode="numeric"
+              maxLength={6}
+              placeholder={String(MIN_PRICE)}
               value={filters.minPrice}
+              error={filters.minPrice !== "" && minNum < MIN_PRICE}
               onChange={(e) =>
-                onChange({ ...filters, minPrice: e.target.value })
+                onChange({ ...filters, minPrice: cleanPrice(e.target.value) })
               }
             />
           </div>
@@ -77,12 +85,14 @@ export function FilterPanel({
             <Input
               id="filter-max"
               label="Max"
-              type="number"
-              min={0}
-              placeholder="6000"
+              type="text"
+              inputMode="numeric"
+              maxLength={6}
+              placeholder="100000"
               value={filters.maxPrice}
+              error={filters.maxPrice !== "" && maxNum < MIN_PRICE}
               onChange={(e) =>
-                onChange({ ...filters, maxPrice: e.target.value })
+                onChange({ ...filters, maxPrice: cleanPrice(e.target.value) })
               }
             />
           </div>

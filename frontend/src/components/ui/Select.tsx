@@ -48,7 +48,7 @@ export function Select({
         {current.label}
         <svg
           viewBox="0 0 24 24"
-          className={`h-3.5 w-3.5 transition-transform ${open ? "rotate-180" : ""}`}
+          className={`h-3.5 w-3.5 transition-transform duration-200 motion-reduce:transition-none ${open ? "rotate-180" : ""}`}
           fill="none"
           stroke="currentColor"
           strokeWidth={2}
@@ -60,7 +60,7 @@ export function Select({
       {open && (
         <ul
           role="listbox"
-          className="absolute right-0 z-20 mt-1.5 w-full min-w-[9rem] overflow-hidden rounded-lg border border-border/10 bg-surface py-1 shadow-lg"
+          className="anim-pop-in absolute right-0 z-20 mt-1.5 w-full min-w-[9rem] origin-top-right overflow-hidden rounded-lg border border-border/10 bg-surface py-1 shadow-lg"
         >
           {options
             .filter((o) => o.value !== value)
@@ -74,7 +74,7 @@ export function Select({
                     onChange(o.value);
                     setOpen(false);
                   }}
-                  className="block w-full px-3 py-2 text-left text-sm text-ink hover:bg-bg"
+                  className="block w-full px-3 py-2 text-left text-sm text-ink transition-colors hover:bg-bg"
                 >
                   {o.label}
                 </button>

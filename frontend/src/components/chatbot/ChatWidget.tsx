@@ -473,10 +473,10 @@ export function ChatWidget() {
   return (
     <div
       id="chat"
-      className="fixed bottom-20 right-4 z-50 md:bottom-6 md:right-6 "
+      className="fixed bottom-20 right-4 z-50 lg:bottom-6 lg:right-6"
     >
       {open && (
-        <div className="mb-3 flex h-[420px] w-[320px] flex-col overflow-hidden rounded-card border border-black/10 bg-surface shadow-xl">
+        <div className="anim-pop-in mb-3 flex h-[420px] max-h-[calc(100dvh-9rem)] w-[320px] max-w-[calc(100vw-2rem)] origin-bottom-right flex-col overflow-hidden rounded-card border border-black/10 bg-surface shadow-xl">
           <div className="flex items-center justify-between border-b border-black/5 px-4 py-3">
             <div>
               <p className="text-sm font-semibold">Sansaaric Stay Assistant</p>
@@ -556,7 +556,7 @@ export function ChatWidget() {
       {!open && (
         <button
           onClick={openChat}
-          className="relative flex h-14 w-14 items-center justify-center rounded-full bg-brand-500 text-white shadow-lg hover:bg-brand-600"
+          className="anim-pop-in relative flex h-14 w-14 items-center justify-center rounded-full bg-brand-500 text-white shadow-lg transition-[transform,background-color] duration-200 hover:scale-105 hover:bg-brand-600 active:scale-95 motion-reduce:transition-none"
           aria-label="Open Chat"
         >
           💬

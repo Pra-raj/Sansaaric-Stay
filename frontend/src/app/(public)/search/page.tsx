@@ -1,5 +1,4 @@
-import { SearchExperience } from "@/components/search/SearchExperience";
-import { getHotels } from "@/lib/api-client";
+import { SearchLoader } from "@/components/search/SearchLoader";
 import { Metadata } from "next";
 
 export const metadata: Metadata = {
@@ -14,11 +13,11 @@ export default async function SearchPage({
 }) {
   const { location, q } = await searchParams;
   const initialLocation = location ?? q ?? "";
-  const hotels = await getHotels();
 
+  // The page shows instantly; hotels load in the browser (shared cache, skeleton while waiting).
   return (
     <div className="mx-auto max-w-6xl px-4 py-8">
-      <SearchExperience hotels={hotels} initialLocation={initialLocation} />
+      <SearchLoader key={initialLocation} initialLocation={initialLocation} />
     </div>
   );
 }

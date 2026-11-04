@@ -2,6 +2,7 @@ import { dummyBookings, dummyHotels, dummyReviews } from "./placeholder-data";
 import { getAccessToken, refreshAccessToken, clearSession } from "./auth";
 import { API_BASE_URL } from "./api-base";
 import { simulateNetwork } from "./simulate-network";
+import { matchesLocation } from "./hotel-filter";
 import { getFileExtension } from "./admin-utils";
 import {
   LIMITS,
@@ -16,6 +17,7 @@ import type {
   AdminHotel,
   AdminHotelInput,
   Booking,
+  Destination,
   Hotel,
   InboxChannel,
   InboxListItem,
@@ -163,9 +165,40 @@ function normalizeReview(raw: RawHotelReview): Review {
   };
 }
 
+/** Backend PublicReviewSerializer payload (my reviews). */
+interface RawMyReview {
+  id: string;
+  booking_id: number | string;
+  hotel_id: number | string;
+  rating: number | string;
+  comment?: string;
+  created_at?: string;
+}
+
+export interface MyReview {
+  id: string;
+  bookingId: string;
+  hotelId: string;
+  rating: number;
+  comment: string;
+  createdAt: string;
+}
+
+function normalizeMyReview(raw: RawMyReview): MyReview {
+  return {
+    id: String(raw.id),
+    bookingId: String(raw.booking_id),
+    hotelId: String(raw.hotel_id),
+    rating: Number(raw.rating),
+    comment: raw.comment ?? "",
+    createdAt: raw.created_at ?? "",
+  };
+}
+
 /** Backend BookingSummarySerializer payload. */
 interface RawBooking {
   id: string;
+  user_id?: number | string;
   hotel_name?: string;
   hotel_location?: string;
   check_in: string;
@@ -189,6 +222,7 @@ function normalizeBooking(raw: RawBooking): Booking {
     checkOut: raw.check_out,
     guests: raw.guests,
     status,
+    userId: raw.user_id !== undefined ? String(raw.user_id) : undefined,
   };
 }
 
@@ -208,6 +242,37 @@ function fallbackOrThrow<T>(err: unknown, makeDummy: () => Promise<T>): Promise<
   return makeDummy();
 }
 
+// All published hotels, fetched once and shared (home counts + search use the
+// same list, so the numbers always match). Pages through the API 100 at a time.
+let hotelsCache: { at: number; promise: Promise<RawHotel[]> } | null = null;
+const HOTELS_TTL_MS = 60_000;
+
+export function clearHotelsCache(): void {
+  hotelsCache = null;
+}
+
+function fetchAllHotelRows(): Promise<RawHotel[]> {
+  const now = Date.now();
+  if (hotelsCache && now - hotelsCache.at < HOTELS_TTL_MS) return hotelsCache.promise;
+  const promise = (async () => {
+    const all: RawHotel[] = [];
+    for (let page = 1; page <= 20; page++) {
+      const data = await apiFetch<RawHotel[] | { results?: RawHotel[]; next?: string | null }>(
+        `/hotels?page_size=100&page=${page}`,
+      );
+      if (Array.isArray(data)) return data;
+      all.push(...(data.results ?? []));
+      if (!data.next) break;
+    }
+    return all;
+  })();
+  hotelsCache = { at: now, promise };
+  promise.catch(() => {
+    if (hotelsCache?.promise === promise) hotelsCache = null;
+  });
+  return promise;
+}
+
 export async function getHotels(params: HotelSearchParams = {}): Promise<Hotel[]> {
   const search = new URLSearchParams();
   if (params.location) search.set("location", params.location);
@@ -217,7 +282,9 @@ export async function getHotels(params: HotelSearchParams = {}): Promise<Hotel[]
   if (params.minRating !== undefined) search.set("minRating", String(params.minRating));
   const qs = search.toString();
   try {
-    const rows = await apiList<RawHotel>(`/hotels${qs ? `?${qs}` : ""}`);
+    const rows = qs
+      ? await apiList<RawHotel>(`/hotels?${qs}&page_size=100`)
+      : await fetchAllHotelRows();
     return rows.map(normalizeHotel);
   } catch (err) {
     return fallbackOrThrow(err, () => {
@@ -272,8 +339,81 @@ export async function getMyBookings(): Promise<Booking[]> {
   }
 }
 
+/** Reviews written by the logged-in customer. */
+export async function getMyReviews(): Promise<MyReview[]> {
+  const rows = await apiList<RawMyReview>("/reviews?page_size=100");
+  return rows.map(normalizeMyReview);
+}
+
+/** Leave a review for a finished stay (backend: POST /api/reviews). */
+export async function createReview(payload: {
+  bookingId: string;
+  rating: number;
+  comment: string;
+}): Promise<MyReview> {
+  const raw = await apiFetch<RawMyReview>("/reviews", {
+    method: "POST",
+    body: JSON.stringify({
+      booking_id: Number.isNaN(Number(payload.bookingId)) ? payload.bookingId : Number(payload.bookingId),
+      rating: payload.rating,
+      comment: payload.comment,
+    }),
+  });
+  clearHotelsCache(); // the hotel's average rating just changed
+  return normalizeMyReview(raw);
+}
+
+/** Top places with the real number of hotels (same list and same match rule as the search page). */
+export async function getDestinations(limit = 4): Promise<Destination[]> {
+  const hotels = await getHotels();
+  const names = new Map<string, number>();
+  for (const h of hotels) {
+    const name = h.location.split(",")[0].trim();
+    if (name) names.set(name, 0);
+  }
+  return [...names.keys()]
+    .map((name) => ({
+      id: name.toLowerCase(),
+      name,
+      hotelCount: hotels.filter((h) => matchesLocation(h, name)).length,
+    }))
+    .sort((a, b) => b.hotelCount - a.hotelCount || a.name.localeCompare(b.name))
+    .slice(0, limit);
+}
+
+export interface Room {
+  id: string;
+  name: string;
+  price: number;
+  maxGuests: number;
+}
+
+interface RawRoom {
+  id: string;
+  name: string;
+  base_price: number | string;
+  max_guests: number;
+}
+
+/** Rooms a guest can book at a hotel (backend: GET /api/hotels/{id}/rooms). */
+export async function getHotelRooms(hotelId: string): Promise<Room[]> {
+  try {
+    const rows = await apiList<RawRoom>(`/hotels/${hotelId}/rooms?page_size=100`);
+    return rows.map((r) => ({
+      id: String(r.id),
+      name: r.name,
+      price: Number(r.base_price),
+      maxGuests: r.max_guests,
+    }));
+  } catch {
+    return [];
+  }
+}
+
 export interface CreateBookingPayload {
   hotelId: string;
+  /** Room to book (from getHotelRooms). */
+  roomId?: string;
   checkIn: string;
   checkOut: string;
   guests: number;
@@ -285,15 +425,21 @@ export interface CreateBookingPayload {
 
 export async function createBooking(payload: CreateBookingPayload): Promise<Booking> {
   try {
-    return await apiFetch<Booking>("/bookings", {
+    if (!payload.roomId) throw new Error("Please choose a room.");
+    const raw = await apiFetch<RawBooking>("/bookings", {
       method: "POST",
-      body: JSON.stringify(payload),
+      body: JSON.stringify({
+        room_id: payload.roomId,
+        check_in: payload.checkIn,
+        check_out: payload.checkOut,
+        guests: payload.guests,
+      }),
     });
+    return normalizeBooking(raw);
   } catch (err) {
-    // ponytail: the booking flow is still demo-only — the backend wants
-    // {room_id, check_in, check_out, guests} and this UI has no room picker
-    // yet. Show the fake confirmation in dev; production surfaces the error.
-    if (!isMockAllowed()) throw err;
+    // Real server answers (validation, 401...) always reach the user. The fake
+    // confirmation is only for dev when the server cannot be reached at all.
+    if (err instanceof ApiError || !(err instanceof TypeError) || !isMockAllowed()) throw err;
     const hotel = dummyHotels.find((h) => h.id === payload.hotelId);
     const fakeBooking: Booking = {
       id: `bk-${Math.floor(Math.random() * 9000 + 1000)}`,

@@ -13,13 +13,21 @@ function RecommendationCard({ hotel }: { hotel: Hotel }) {
   return (
     <Link
       href={`/hotels/${hotel.id}`}
-      className="block overflow-hidden rounded-card border border-border/10 bg-surface transition-shadow hover:shadow-md"
+      className="group flex h-full flex-col overflow-hidden rounded-card border border-border bg-surface shadow-sm ring-1 ring-black/[0.03] transition-[transform,box-shadow] duration-300 ease-out hover:-translate-y-0.5 hover:shadow-lg motion-reduce:transition-none motion-reduce:hover:translate-y-0"
     >
       {media ? (
-        // eslint-disable-next-line @next/next/no-img-element
-        <img src={media.images[0]} alt={hotel.name} className="h-36 w-full object-cover" />
+        <div className="h-36 shrink-0 overflow-hidden">
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src={media.images[0]}
+            alt={hotel.name}
+            loading="lazy"
+            decoding="async"
+            className="h-full w-full object-cover transition-transform duration-500 ease-out group-hover:scale-105 motion-reduce:transition-none"
+          />
+        </div>
       ) : (
-        <div className="flex h-36 items-center justify-center bg-brand-100 text-xs text-brand-600">
+        <div className="flex h-36 shrink-0 items-center justify-center bg-brand-100 text-xs text-brand-600">
           [ thumbnail placeholder ]
         </div>
       )}

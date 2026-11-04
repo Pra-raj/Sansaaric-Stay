@@ -4,6 +4,7 @@ import { Badge } from "@/components/ui/Badge";
 import { HotelBookingAside } from "@/components/booking/HotelBookingAside";
 import { getHotelById, getHotelReviews } from "@/lib/api-client";
 import { getSeedMedia } from "@/lib/seed-media";
+import { HotelReviewPrompt } from "@/components/hotel/HotelReviewPrompt";
 import { HotelGallery } from "@/components/hotel/HotelGallery";
 
 export async function generateMetadata({
@@ -107,7 +108,11 @@ export default async function HotelDetailPage({
 
           <div>
             <h2 className="mb-3 font-semibold">Reviews</h2>
+            <HotelReviewPrompt hotelName={hotel.name} />
             <div className="space-y-3">
+              {reviews.length === 0 && (
+                <p className="text-sm text-ink-soft">No reviews yet.</p>
+              )}
               {reviews.map((review) => (
                 <div
                   key={review.id}

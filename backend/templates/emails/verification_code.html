@@ -1,0 +1,17 @@
+{% extends "emails/base.html" %}
+{% block title %}Your confirmation code{% endblock %}
+{% block content %}
+<p style="margin:0 0 8px;font-size:15px;font-weight:600;">Hi{% if name %} {{ name }}{% endif %},</p>
+<p style="margin:0 0 20px;font-size:14px;line-height:1.65;color:#4b5563;">
+  Use the code below to confirm your email and finish creating your Sansaaric Stay account.
+</p>
+<div style="margin:0 0 20px;padding:18px;text-align:center;background:#f0fdfa;border:1px solid #99f6e4;border-radius:12px;">
+  <span style="font-size:34px;font-weight:700;letter-spacing:10px;color:#0f766e;">{{ code }}</span>
+</div>
+<p style="margin:0 0 10px;font-size:13px;line-height:1.6;color:#6b7280;">
+  The code expires in {{ minutes }} minutes and can only be used once.
+</p>
+<p style="margin:0;font-size:13px;line-height:1.6;color:#6b7280;">
+  Didn't sign up? You can safely ignore this email.
+</p>
+{% endblock %}

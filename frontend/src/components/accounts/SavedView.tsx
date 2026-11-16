@@ -17,16 +17,24 @@ export function SavedView() {
   const { savedIds } = useSaved();
   const [hotels, setHotels] = useState<Hotel[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
 
   useEffect(() => {
     if (!isLoggedIn) return;
     let cancelled = false;
-    getHotels().then((result) => {
-      if (!cancelled) {
-        setHotels(result);
-        setLoading(false);
-      }
-    });
+    getHotels()
+      .then((result) => {
+        if (!cancelled) {
+          setHotels(result);
+          setLoading(false);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setError("Could not load your saved stays. Please refresh the page.");
+          setLoading(false);
+        }
+      });
     return () => {
       cancelled = true;
     };
@@ -54,7 +62,9 @@ export function SavedView() {
         <AccountSidebar user={user} />
         <div>
           <h1 className="mb-4 text-2xl font-bold">Saved Stays</h1>
-          {loading ? (
+          {error ? (
+            <p className="py-12 text-center text-sm text-ink-soft">{error}</p>
+          ) : loading ? (
             <div className="grid grid-cols-1 gap-5 sm:grid-cols-2">
               <Skeleton className="h-56 rounded-card" />
               <Skeleton className="h-56 rounded-card" />

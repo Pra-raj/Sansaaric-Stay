@@ -22,6 +22,7 @@ export function AccountView() {
   const [bookings, setBookings] = useState<Booking[]>([]);
   const [myReviews, setMyReviews] = useState<MyReview[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
   const [activeTab, setActiveTab] = useState<(typeof tabs)[number]>("Upcoming");
   const [selectedBooking, setSelectedBooking] = useState<Booking | null>(null);
 
@@ -29,12 +30,19 @@ export function AccountView() {
     if (!isLoggedIn) return;
     let cancelled = false;
     getMyReviews().then((r) => !cancelled && setMyReviews(r)).catch(() => {});
-    getMyBookings().then((result) => {
-      if (!cancelled) {
-        setBookings(result);
-        setLoading(false);
-      }
-    });
+    getMyBookings()
+      .then((result) => {
+        if (!cancelled) {
+          setBookings(result);
+          setLoading(false);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setError("Could not load your bookings. Please refresh the page.");
+          setLoading(false);
+        }
+      });
     return () => {
       cancelled = true;
     };
@@ -79,7 +87,9 @@ export function AccountView() {
             ))}
           </div>
 
-          {loading ? (
+          {error ? (
+            <p className="py-12 text-center text-sm text-ink-soft">{error}</p>
+          ) : loading ? (
             <div className="space-y-4">
               {[1, 2].map((n) => (
                 <Skeleton key={n} className="h-24 rounded-card" />
@@ -140,6 +150,9 @@ export function AccountView() {
         <BookingDetailsModal
           booking={selectedBooking}
           onClose={() => setSelectedBooking(null)}
+          onCancelled={(id) =>
+            setBookings((prev) => prev.filter((b) => b.id !== id))
+          }
         />
       )}
     </div>

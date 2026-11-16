@@ -3,10 +3,11 @@
 import {
   createContext,
   ReactNode,
+  useCallback,
   useContext,
   useEffect,
   useMemo,
-  useState,
+  useSyncExternalStore,
 } from "react";
 
 type Theme = "light" | "dark";
@@ -18,35 +19,54 @@ interface ThemeContextValue {
 
 const ThemeContext = createContext<ThemeContextValue | undefined>(undefined);
 
+const STORAGE_KEY = "sansaaric-theme";
+const listeners = new Set<() => void>();
+let cachedTheme: Theme | null = null;
+
+function readTheme(): Theme {
+  if (typeof window === "undefined") return "light";
+  const stored = localStorage.getItem(STORAGE_KEY);
+  if (stored === "dark" || stored === "light") return stored;
+  return window.matchMedia("(prefers-color-scheme: dark)").matches
+    ? "dark"
+    : "light";
+}
+
+function getSnapshot(): Theme {
+  cachedTheme ??= readTheme();
+  return cachedTheme;
+}
+
+function getServerSnapshot(): Theme {
+  return "light";
+}
+
+function subscribe(listener: () => void): () => void {
+  listeners.add(listener);
+  return () => listeners.delete(listener);
+}
+
+function applyTheme(next: Theme) {
+  cachedTheme = next;
+  document.documentElement.classList.toggle("dark", next === "dark");
+  localStorage.setItem(STORAGE_KEY, next);
+  listeners.forEach((listener) => listener());
+}
+
 export function ThemeProvider({ children }: { children: ReactNode }) {
-  const [theme, setTheme] = useState<Theme>("light");
-  const [mounted, setMounted] = useState(false);
+  const theme = useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
 
+  // The inline script already applied the stored class before hydration; this
+  // keeps the DOM in sync when the theme changes afterwards.
   useEffect(() => {
-    setMounted(true);
-    const stored = localStorage.getItem("sansaaric-theme");
-    if (stored === "dark" || stored === "light") {
-      setTheme(stored);
-    } else if (window.matchMedia("(prefers-color-scheme: dark)").matches) {
-      setTheme("dark");
-    }
-  }, []);
-
-  useEffect(() => {
-    if (!mounted) return;
     document.documentElement.classList.toggle("dark", theme === "dark");
-  }, [theme, mounted]);
+  }, [theme]);
 
-  function toggleTheme() {
-    setTheme((prev) => {
-      const next = prev === "light" ? "dark" : "light";
-      document.documentElement.classList.toggle("dark", next === "dark");
-      localStorage.setItem("sansaaric-theme", next);
-      return next;
-    });
-  }
+  const toggleTheme = useCallback(() => {
+    applyTheme(theme === "light" ? "dark" : "light");
+  }, [theme]);
 
-  const value = useMemo(() => ({ theme, toggleTheme }), [theme]);
+  const value = useMemo(() => ({ theme, toggleTheme }), [theme, toggleTheme]);
 
   return (
     <ThemeContext.Provider value={value}>{children}</ThemeContext.Provider>

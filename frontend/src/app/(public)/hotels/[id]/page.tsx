@@ -6,6 +6,7 @@ import { getHotelById, getHotelReviews } from "@/lib/api-client";
 import { getSeedMedia } from "@/lib/seed-media";
 import { HotelReviewPrompt } from "@/components/hotel/HotelReviewPrompt";
 import { HotelGallery } from "@/components/hotel/HotelGallery";
+import type { Hotel, Review } from "@/types";
 
 export async function generateMetadata({
   params,
@@ -13,7 +14,12 @@ export async function generateMetadata({
   params: Promise<{ id: string }>;
 }): Promise<Metadata> {
   const { id } = await params;
-  const hotel = await getHotelById(id);
+  let hotel: Hotel | null = null;
+  try {
+    hotel = await getHotelById(id);
+  } catch {
+    return { title: "Stay unavailable" };
+  }
   if (!hotel) return { title: "Hotel not found" };
   return {
     title: hotel.name,
@@ -32,9 +38,29 @@ export default async function HotelDetailPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = await params;
-  const hotel = await getHotelById(id);
+  let hotel: Hotel | null = null;
+  let hotelFailed = false;
+  try {
+    hotel = await getHotelById(id);
+  } catch {
+    hotelFailed = true;
+  }
+  if (hotelFailed) {
+    return (
+      <p className="py-24 text-center text-sm text-ink-soft">
+        Could not load this stay. Please refresh the page.
+      </p>
+    );
+  }
   if (!hotel) notFound();
-  const reviews = await getHotelReviews(hotel.id);
+
+  let reviews: Review[] = [];
+  let reviewsFailed = false;
+  try {
+    reviews = await getHotelReviews(hotel.id);
+  } catch {
+    reviewsFailed = true;
+  }
   const media = getSeedMedia(hotel.name);
 
   const jsonLd = {
@@ -110,8 +136,14 @@ export default async function HotelDetailPage({
             <h2 className="mb-3 font-semibold">Reviews</h2>
             <HotelReviewPrompt hotelName={hotel.name} />
             <div className="space-y-3">
-              {reviews.length === 0 && (
-                <p className="text-sm text-ink-soft">No reviews yet.</p>
+              {reviewsFailed ? (
+                <p className="text-sm text-ink-soft">
+                  Could not load reviews. Please refresh the page.
+                </p>
+              ) : (
+                reviews.length === 0 && (
+                  <p className="text-sm text-ink-soft">No reviews yet.</p>
+                )
               )}
               {reviews.map((review) => (
                 <div

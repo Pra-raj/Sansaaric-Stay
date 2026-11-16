@@ -51,6 +51,10 @@ export interface Booking {
   checkOut: string;
   guests: number;
   status: "Upcoming" | "Completed" | "Cancelled";
+  /** Backend status, kept so actions can depend on the real state. */
+  rawStatus?: "pending" | "confirmed" | "cancelled" | "completed";
+  /** Server-provided shortcut: this stay has already been reviewed. */
+  hasReview?: boolean;
   /** Owner of the booking (staff accounts receive everyone's bookings). */
   userId?: string;
 }

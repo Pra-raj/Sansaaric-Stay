@@ -1,9 +1,16 @@
 import { getRecommendations } from "@/lib/api-client";
 import RecommendationCardItem from "../search/RecommendationCard";
 import Link from "next/link";
+import type { Hotel } from "@/types";
 
 async function Recommendation() {
-  const hotels = await getRecommendations(4);
+  let hotels: Hotel[] = [];
+  let failed = false;
+  try {
+    hotels = await getRecommendations(4);
+  } catch {
+    failed = true;
+  }
 
   return (
     <section className="bg-surface py-12">
@@ -22,11 +29,21 @@ async function Recommendation() {
             View all stays <span aria-hidden="true">→</span>
           </Link>
         </div>
-        <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-4">
-          {hotels.map((hotel) => (
-            <RecommendationCardItem key={hotel.id} hotel={hotel} />
-          ))}
-        </div>
+        {failed ? (
+          <p className="py-12 text-center text-sm text-ink-soft">
+            Could not load stays. Please refresh the page.
+          </p>
+        ) : hotels.length === 0 ? (
+          <p className="py-12 text-center text-sm text-ink-soft">
+            No stays available right now.
+          </p>
+        ) : (
+          <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-4">
+            {hotels.map((hotel) => (
+              <RecommendationCardItem key={hotel.id} hotel={hotel} />
+            ))}
+          </div>
+        )}
       </div>
     </section>
   );

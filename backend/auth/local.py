@@ -13,7 +13,11 @@ import jwt
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.contrib.auth.hashers import check_password
+from django.contrib.auth.tokens import default_token_generator
+from django.core.exceptions import ValidationError
 from django.db.models import Q
+from django.utils.encoding import force_bytes, force_str
+from django.utils.http import urlsafe_base64_decode, urlsafe_base64_encode
 
 ALGORITHM = "HS256"
 ACCESS_TTL = 60 * 60
@@ -85,6 +89,34 @@ def decode_refresh(token):
     if claims is None or claims.get("typ") != "refresh" or not claims.get("sub"):
         return None
     return claims
+
+
+# Password reset tokens are Django's default_token_generator: they embed a
+# timestamp + password hash, so they expire (PASSWORD_RESET_TIMEOUT) and stop
+# working automatically once the password changes. No extra table needed.
+
+def password_reset_uid(user):
+    return urlsafe_base64_encode(force_bytes(user.pk))
+
+
+def password_reset_token(user):
+    return default_token_generator.make_token(user)
+
+
+def user_from_reset_uid(uidb64):
+    """Resolve the uid half of a reset link, or None if it is malformed."""
+    try:
+        pk = force_str(urlsafe_base64_decode(uidb64))
+    except (TypeError, ValueError, OverflowError, ValidationError):
+        return None
+    # Django's default user pk is an int; anything else can't match.
+    if not pk.isdigit():
+        return None
+    return get_user_model().objects.filter(pk=pk, is_active=True).first()
+
+
+def reset_token_is_valid(user, token):
+    return default_token_generator.check_token(user, token)
 
 
 def _decode(token):

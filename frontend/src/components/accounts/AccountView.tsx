@@ -1,12 +1,14 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useState } from "react";
 import { useAuthModal } from "@/lib/auth-modal-context";
 import { statusTone } from "@/lib/booking-utils";
 import type { Booking } from "@/types";
 import { Button } from "../ui/Button";
 import { useAuth } from "@/lib/auth-context";
-import { getMyBookings } from "@/lib/api-client";
+import { getMyBookings, getMyReviews, type MyReview } from "@/lib/api-client";
+import { canReview, onlyMine } from "@/lib/review-utils";
 import { Badge } from "../ui/Badge";
 import { Skeleton } from "../ui/Skeleton";
 import { AccountSidebar } from "./AccountSidebar";
@@ -18,6 +20,7 @@ export function AccountView() {
   const { isLoggedIn, user } = useAuth();
   const { openLogin } = useAuthModal();
   const [bookings, setBookings] = useState<Booking[]>([]);
+  const [myReviews, setMyReviews] = useState<MyReview[]>([]);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<(typeof tabs)[number]>("Upcoming");
   const [selectedBooking, setSelectedBooking] = useState<Booking | null>(null);
@@ -25,6 +28,7 @@ export function AccountView() {
   useEffect(() => {
     if (!isLoggedIn) return;
     let cancelled = false;
+    getMyReviews().then((r) => !cancelled && setMyReviews(r)).catch(() => {});
     getMyBookings().then((result) => {
       if (!cancelled) {
         setBookings(result);
@@ -54,7 +58,8 @@ export function AccountView() {
     );
   }
 
-  const visibleBookings = bookings.filter((b) => b.status === activeTab);
+  const myBookings = onlyMine(bookings, user?.id);
+  const visibleBookings = myBookings.filter((b) => b.status === activeTab);
 
   return (
     <div className="mx-auto max-w-6xl px-4 py-4">
@@ -85,7 +90,7 @@ export function AccountView() {
               {visibleBookings.map((booking) => (
                 <div
                   key={booking.id}
-                  className="flex flex-col gap-4 rounded-card border border-black/5 bg-surface p-4 sm:flex-row sm:items-center"
+                  className="flex flex-col gap-4 rounded-card border border-border bg-surface p-4 shadow-sm sm:flex-row sm:items-center"
                 >
                   <div className="h-20 w-full shrink-0 rounded-lg bg-brand-100 sm:w-28" />
                   <div className="flex-1">
@@ -104,12 +109,22 @@ export function AccountView() {
                       Booking ID: {booking.id}
                     </p>
                   </div>
-                  <button
-                    onClick={() => setSelectedBooking(booking)}
-                    className="text-sm font-semibold text-brand-600 hover:underline"
-                  >
-                    View details
-                  </button>
+                  <div className="flex flex-col items-start gap-2">
+                    <button
+                      onClick={() => setSelectedBooking(booking)}
+                      className="text-sm font-semibold text-brand-600 hover:underline"
+                    >
+                      View details
+                    </button>
+                    {canReview(booking, myReviews) && (
+                      <Link
+                        href="/account/reviews"
+                        className="text-sm font-semibold text-accent-500 hover:underline"
+                      >
+                        Write a review
+                      </Link>
+                    )}
+                  </div>
                 </div>
               ))}
             </div>

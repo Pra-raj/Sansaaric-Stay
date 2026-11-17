@@ -51,6 +51,8 @@ export interface Booking {
   checkOut: string;
   guests: number;
   status: "Upcoming" | "Completed" | "Cancelled";
+  /** Owner of the booking (staff accounts receive everyone's bookings). */
+  userId?: string;
 }
 
 

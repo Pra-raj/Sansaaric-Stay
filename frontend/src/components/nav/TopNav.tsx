@@ -1,6 +1,8 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
+import { useState } from "react";
 import { Search } from "lucide-react";
 import { Button } from "../ui/Button";
 import { Avatar } from "../ui/Avatar";
@@ -26,7 +28,22 @@ const links = [
 // Header section
 function TopNav() {
   const { openLogin, openSignup } = useAuthModal();
-  const { isLoggedIn, user } = useAuth();
+  const { isLoggedIn, isLoading, user, logOut } = useAuth();
+  const router = useRouter();
+  const [query, setQuery] = useState("");
+
+  // Client-side navigation: the page (and the login state) is not reloaded.
+  function handleSearch(e: React.FormEvent) {
+    e.preventDefault();
+    const q = query.trim();
+    router.push(q ? `/search?q=${encodeURIComponent(q)}` : "/search");
+  }
+
+  function handleLogOut() {
+    logOut();
+    router.push("/");
+  }
+
   return (
     <header className="sticky top-0 z-40 border-b border-brand-100 bg-surface/95 backdrop-blur">
       <div className="mx-auto flex max-w-6xl items-center gap-3 px-4 py-3.5 sm:px-6 lg:gap-6">
@@ -37,12 +54,14 @@ function TopNav() {
           Sansaaric Stay
         </Link>
 
-        <form action="/search" className="hidden flex-1 lg:block">
+        <form onSubmit={handleSearch} className="hidden flex-1 lg:block">
           <div className="relative flex max-w-sm items-center gap-2 rounded-full border border-brand-100 bg-bg px-3.5 py-2 transition-colors focus-within:border-brand-500 focus-within:ring-2 focus-within:ring-brand-100">
             <Search aria-hidden className="size-4 text-brand-600" />
             <input
               name="q"
               type="text"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
               placeholder="Search destinations, hotels.."
               aria-label="Search destinations and hotels"
               className="w-full bg-transparent text-sm outline-none placeholder:text-ink-soft"
@@ -59,10 +78,17 @@ function TopNav() {
         </nav>
 
         <div className="hidden shrink-0 items-center gap-3 lg:flex">
-          {isLoggedIn && user ? (
-            <Link href="/account" aria-label={`Your account, ${user.name}`}>
-              <Avatar user={user} size={36} />
-            </Link>
+          {isLoading ? (
+            <div className="h-9 w-24" aria-hidden />
+          ) : isLoggedIn && user ? (
+            <>
+              <Link href="/account" aria-label={`Your account, ${user.name}`}>
+                <Avatar user={user} size={36} />
+              </Link>
+              <Button variant="ghost" onClick={handleLogOut}>
+                Log out
+              </Button>
+            </>
           ) : (
             <>
               <Button variant="ghost" onClick={openLogin}>

@@ -8,7 +8,7 @@ import BookingSummary from "@/components/booking/BookingSummary";
 import { Button } from "@/components/ui/Button";
 import Input from "@/components/ui/Input";
 import { Skeleton } from "@/components/ui/Skeleton";
-import { createBooking, getHotelById } from "@/lib/api-client";
+import { createBooking, getHotelById, getHotelRooms, type Room } from "@/lib/api-client";
 import { isDateRangeValid, nightsBetween, todayISO } from "@/lib/date-utils";
 import { isValidEmail } from "@/lib/validation";
 import { useAuth } from "@/lib/auth-context";
@@ -29,6 +29,8 @@ export default function BookingFlowPage({
 
   const [hotel, setHotel] = useState<Hotel | null>(null);
   const [hotelLoading, setHotelLoading] = useState(true);
+  const [rooms, setRooms] = useState<Room[]>([]);
+  const [roomId, setRoomId] = useState("");
 
   const [step, setStep] = useState(1);
   const [step1Attempted, setStep1Attempted] = useState(false);
@@ -63,6 +65,13 @@ export default function BookingFlowPage({
         setHotel(result);
         setHotelLoading(false);
       }
+    });
+    getHotelRooms(id).then((list) => {
+      if (cancelled) return;
+      setRooms(list);
+      // Pre-select the cheapest room.
+      const cheapest = [...list].sort((a, b) => a.price - b.price)[0];
+      if (cheapest) setRoomId(cheapest.id);
     });
     return () => {
       cancelled = true;
@@ -106,8 +115,21 @@ export default function BookingFlowPage({
   const guests = parseInt(guestsInput, 10) || 0;
   const nights = nightsBetween(checkIn, checkOut);
   const dateRangeValid = isDateRangeValid(checkIn, checkOut);
-  const guestsValid = guests >= 1 && guests <= MAX_GUESTS;
-  const step1Valid = dateRangeValid && guestsValid;
+  const room = rooms.find((r) => r.id === roomId) ?? null;
+  const maxGuests = room ? Math.min(room.maxGuests, MAX_GUESTS) : MAX_GUESTS;
+  const guestsValid = guests >= 1 && guests <= maxGuests;
+  const roomValid = rooms.length === 0 || room !== null;
+  const step1Valid = dateRangeValid && guestsValid && roomValid;
+  const checkInError = !checkIn
+    ? "Check-in date is required."
+    : checkIn < todayISO()
+      ? "Check-in cannot be in the past."
+      : "";
+  const checkOutError = !checkOut
+    ? "Check-out date is required."
+    : checkIn && checkOut <= checkIn
+      ? "Check-out must be after check-in."
+      : "";
 
   const nameValid = fullName.trim().length > 1;
   const emailValid = isValidEmail(email);
@@ -115,7 +137,8 @@ export default function BookingFlowPage({
   const step2Valid = nameValid && emailValid && phoneValid;
 
   const serviceFee = 250;
-  const total = hotel.startingPrice * Math.max(nights, 1) + serviceFee;
+  const nightly = room ? room.price : hotel.startingPrice;
+  const total = nightly * Math.max(nights, 1) + serviceFee;
 
   const draft: BookingDraft = {
     hotelId: hotel.id,
@@ -124,7 +147,7 @@ export default function BookingFlowPage({
     checkOut: checkOut || "Not selected",
     guests,
     nights: Math.max(nights, 1),
-    pricePerNight: hotel.startingPrice,
+    pricePerNight: nightly,
     serviceFee,
     total,
   };
@@ -153,6 +176,7 @@ export default function BookingFlowPage({
     try {
       const booking = await createBooking({
         hotelId: hotel!.id,
+        roomId: roomId || undefined,
         checkIn,
         checkOut,
         guests,
@@ -185,6 +209,28 @@ export default function BookingFlowPage({
           {step === 1 && (
             <div className="space-y-4">
               <h2 className="text-lg font-semibold">Trip details</h2>
+              {rooms.length > 0 && (
+                <div className="flex flex-col gap-1.5">
+                  <label
+                    htmlFor="room"
+                    className="text-xs font-semibold uppercase tracking-wide text-ink-soft"
+                  >
+                    Room
+                  </label>
+                  <select
+                    id="room"
+                    value={roomId}
+                    onChange={(e) => setRoomId(e.target.value)}
+                    className="w-full rounded-lg border border-border bg-surface px-3.5 py-2.5 text-sm text-ink outline-none focus:border-brand-500"
+                  >
+                    {rooms.map((r) => (
+                      <option key={r.id} value={r.id}>
+                        {r.name} — NPR {r.price.toLocaleString()} / night (up to {r.maxGuests} guests)
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
               <div className="grid grid-cols-2 gap-4">
                 <Input
                   id="checkin"
@@ -193,7 +239,7 @@ export default function BookingFlowPage({
                   min={todayISO()}
                   value={checkIn}
                   onChange={(e) => setCheckIn(e.target.value)}
-                  error={step1Attempted && !checkIn}
+                  error={step1Attempted && !!checkInError}
                   required
                 />
                 <Input
@@ -203,27 +249,37 @@ export default function BookingFlowPage({
                   min={checkIn || todayISO()}
                   value={checkOut}
                   onChange={(e) => setCheckOut(e.target.value)}
-                  error={step1Attempted && !checkOut}
+                  error={step1Attempted && !!checkOutError}
                   required
                 />
               </div>
+              {step1Attempted && (checkInError || checkOutError) && (
+                <div className="space-y-1">
+                  {checkInError && (
+                    <p className="text-xs font-medium text-red-600">{checkInError}</p>
+                  )}
+                  {checkOutError && (
+                    <p className="text-xs font-medium text-red-600">{checkOutError}</p>
+                  )}
+                </div>
+              )}
               <Input
                 id="guests"
                 label="Guests"
                 type="number"
                 min={1}
-                max={MAX_GUESTS}
+                max={maxGuests}
                 value={guestsInput}
                 onChange={(e) =>
                   setGuestsInput(e.target.value.replace(/[^\d]/g, ""))
                 }
                 error={step1Attempted && !guestsValid}
               />
-              {step1Attempted && guestsInput !== "" && !guestsValid && (
+              {step1Attempted && !guestsValid && (
                 <p className="text-xs font-medium text-red-600">
                   {guests < 1
                     ? "Enter at least 1 guest."
-                    : `Enter no more than ${MAX_GUESTS} guests.`}
+                    : `This room fits at most ${maxGuests} guests.`}
                 </p>
               )}
             </div>
@@ -241,6 +297,11 @@ export default function BookingFlowPage({
                 error={step2Attempted && !nameValid}
                 required
               />
+              {step2Attempted && !nameValid && (
+                <p className="text-xs font-medium text-red-600">
+                  Enter your full name.
+                </p>
+              )}
               <Input
                 id="email"
                 label="Email"
@@ -251,6 +312,11 @@ export default function BookingFlowPage({
                 error={step2Attempted && !email}
                 required
               />
+              {step2Attempted && email.length === 0 && (
+                <p className="text-xs font-medium text-red-600">
+                  Email is required.
+                </p>
+              )}
               {step2Attempted && email.length > 0 && !emailValid && (
                 <p className="text-xs font-medium text-red-600">
                   Enter a valid email address.
@@ -269,6 +335,11 @@ export default function BookingFlowPage({
                 error={step2Attempted && !phone}
                 required
               />
+              {step2Attempted && phone.length === 0 && (
+                <p className="text-xs font-medium text-red-600">
+                  Phone number is required.
+                </p>
+              )}
               {step2Attempted && phone.length > 0 && !phoneValid && (
                 <p className="text-xs font-medium text-red-600">
                   Enter a valid phone number.

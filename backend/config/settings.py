@@ -243,10 +243,42 @@ LOGGING = {
 
 # Email
 # https://docs.djangoproject.com/en/6.1/topics/email/#topic-email-configuration
-# Dev backend prints emails (e.g. password reset) to the console. Override with
-# EMAIL_BACKEND in production (e.g. django.core.mail.backends.smtp.EmailBackend).
+# Defaults to the console backend (emails, e.g. password resets, are printed in
+# the Django terminal). Set EMAIL_BACKEND + EMAIL_HOST* in the environment to
+# send real mail.
 
-EMAIL_BACKEND = "django.core.mail.backends.console.EmailBackend"
+EMAIL_BACKEND = os.getenv(
+    "EMAIL_BACKEND", "django.core.mail.backends.console.EmailBackend"
+)
+DEFAULT_FROM_EMAIL = os.getenv("DEFAULT_FROM_EMAIL", "webmaster@localhost")
+SERVER_EMAIL = os.getenv("SERVER_EMAIL", DEFAULT_FROM_EMAIL)
+EMAIL_HOST = os.getenv("EMAIL_HOST", "")
+EMAIL_PORT = int(os.getenv("EMAIL_PORT", "587"))
+EMAIL_HOST_USER = os.getenv("EMAIL_HOST_USER", "")
+EMAIL_HOST_PASSWORD = os.getenv("EMAIL_HOST_PASSWORD", "")
+EMAIL_USE_TLS = os.getenv("EMAIL_USE_TLS", "1").lower() in ("1", "true")
+# TLS and SSL are mutually exclusive; set EMAIL_USE_SSL=1 only for port 465.
+EMAIL_USE_SSL = os.getenv("EMAIL_USE_SSL", "0").lower() in ("1", "true")
+EMAIL_TIMEOUT = int(os.getenv("EMAIL_TIMEOUT", "10"))
+
+# Browser-visible origin used to build password-reset links. In Docker this is
+# the frontend container's public URL, not the backend's.
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000").rstrip("/")
+
+# Reset links are single-use and short-lived (Django's default is 3 days).
+PASSWORD_RESET_TIMEOUT = 60 * 60
+
+# Signup confirmation codes: lifespan, wrong-guess budget, and how long the
+# client must wait before another code can be emailed for the same account.
+EMAIL_VERIFICATION_TIMEOUT_MINUTES = int(
+    os.getenv("EMAIL_VERIFICATION_TIMEOUT_MINUTES", "15")
+)
+EMAIL_VERIFICATION_MAX_ATTEMPTS = int(
+    os.getenv("EMAIL_VERIFICATION_MAX_ATTEMPTS", "5")
+)
+EMAIL_VERIFICATION_RESEND_SECONDS = int(
+    os.getenv("EMAIL_VERIFICATION_RESEND_SECONDS", "60")
+)
 
 # Supabase Auth (GoTrue) + DRF
 # Read the values from backend/.env (untracked). Local JWTs are HS256-signed
@@ -275,6 +307,17 @@ if os.getenv("DJANGO_SSL", "0") == "1":
     CSRF_COOKIE_SECURE = True
     SECURE_SSL_REDIRECT = True
     SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+    SECURE_HSTS_SECONDS = int(os.getenv("DJANGO_HSTS_SECONDS", "31536000"))
+    SECURE_HSTS_INCLUDE_SUBDOMAINS = True
+    SECURE_HSTS_PRELOAD = True
+
+# Needed only when the API is served over HTTPS on a real domain: Django's
+# admin login and any cookie-authenticated POSTs check the Origin header.
+CSRF_TRUSTED_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv("DJANGO_CSRF_TRUSTED_ORIGINS", "").split(",")
+    if origin.strip()
+]
 
 CORS_ALLOWED_ORIGINS = [
     origin.strip()

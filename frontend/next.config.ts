@@ -1,6 +1,10 @@
 import type { NextConfig } from "next";
 
 const isDev = process.env.NODE_ENV !== "production";
+// Only force HTTPS when the site is actually served over HTTPS. Without this
+// flag, a local production build would rewrite http://localhost:8000 API calls
+// to https:// and break them. Set NEXT_PUBLIC_HTTPS=1 for real deployments.
+const isHttps = process.env.NEXT_PUBLIC_HTTPS === "1";
 
 // The browser may only call our own site and the backend API.
 let apiOrigin = "";
@@ -26,7 +30,7 @@ const csp = [
   "base-uri 'self'",
   "form-action 'self'",
   "frame-ancestors 'none'",
-  ...(isDev ? [] : ["upgrade-insecure-requests"]),
+  ...(isHttps ? ["upgrade-insecure-requests"] : []),
 ].join("; ");
 
 const nextConfig: NextConfig = {
@@ -46,10 +50,14 @@ const nextConfig: NextConfig = {
             key: "Permissions-Policy",
             value: "camera=(), microphone=(), geolocation=(self), payment=()",
           },
-          {
-            key: "Strict-Transport-Security",
-            value: "max-age=63072000; includeSubDomains",
-          },
+          ...(isHttps
+            ? [
+                {
+                  key: "Strict-Transport-Security",
+                  value: "max-age=63072000; includeSubDomains",
+                },
+              ]
+            : []),
         ],
       },
       {

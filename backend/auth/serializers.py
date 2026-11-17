@@ -3,20 +3,24 @@ from django.core.exceptions import ValidationError
 from rest_framework import serializers
 
 
+def _validated_password(value):
+    # Enforce the configured AUTH_PASSWORD_VALIDATORS server-side so the API and
+    # the frontend agree on password rules (supersedes the old min_length=6
+    # floor, which let in passwords the UI couldn't log in).
+    try:
+        validate_password(value)
+    except ValidationError as exc:
+        raise serializers.ValidationError(" ".join(exc.messages))
+    return value
+
+
 class SignupSerializer(serializers.Serializer):
     email = serializers.EmailField()
     password = serializers.CharField(max_length=128, write_only=True)
     full_name = serializers.CharField(required=False, allow_blank=True, max_length=150)
 
     def validate_password(self, value):
-        # Enforce the configured AUTH_PASSWORD_VALIDATORS server-side so the
-        # API and the frontend agree on password rules (supersedes the old
-        # min_length=6 floor, which let in passwords the UI couldn't log in).
-        try:
-            validate_password(value)
-        except ValidationError as exc:
-            raise serializers.ValidationError(" ".join(exc.messages))
-        return value
+        return _validated_password(value)
 
 
 class LoginSerializer(serializers.Serializer):
@@ -27,6 +31,39 @@ class LoginSerializer(serializers.Serializer):
 
 class RefreshSerializer(serializers.Serializer):
     refresh_token = serializers.CharField()
+
+
+class PasswordResetRequestSerializer(serializers.Serializer):
+    email = serializers.EmailField()
+
+
+class VerifyEmailSerializer(serializers.Serializer):
+    email = serializers.EmailField()
+    code = serializers.RegexField(
+        r"^\d{6}$",
+        error_messages={"invalid": "Enter the 6-digit code from the email."},
+    )
+
+
+class ResendVerificationSerializer(serializers.Serializer):
+    email = serializers.EmailField()
+
+
+class PasswordResetConfirmSerializer(serializers.Serializer):
+    uid = serializers.CharField()
+    token = serializers.CharField()
+    password = serializers.CharField(max_length=128, write_only=True)
+
+    def validate_password(self, value):
+        return _validated_password(value)
+
+
+class MessageSerializer(serializers.Serializer):
+    detail = serializers.CharField()
+    # DEBUG-only convenience so the reset flow can be tested without SMTP.
+    reset_url = serializers.CharField(required=False)
+    # Signup responses carry the address the confirmation code went to.
+    email = serializers.EmailField(required=False)
 
 
 class SessionSerializer(serializers.Serializer):
@@ -81,10 +118,20 @@ def serialize_user(user):
     metadata = getattr(user, "user_metadata", None)
     if isinstance(metadata, dict) and metadata.get("full_name"):
         full_name = str(metadata["full_name"])
+    # Local accounts track confirmation on Profile.email_verified; GoTrue users
+    # expose confirmed_at. Fall back to "has an email" for accounts outside the
+    # signup flow (createsuperuser, forced test users).
+    profile = getattr(user, "profile", None)
+    if profile is not None:
+        email_confirmed = bool(profile.email_verified)
+    else:
+        email_confirmed = bool(
+            getattr(user, "confirmed_at", None) or getattr(user, "email", "")
+        )
     return {
         "id": str(getattr(user, "id", "")),
         "email": getattr(user, "email", "") or "",
-        "email_confirmed": bool(getattr(user, "confirmed_at", None) or getattr(user, "email", "")),
+        "email_confirmed": email_confirmed,
         "full_name": full_name,
     }
 

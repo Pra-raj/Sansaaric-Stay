@@ -12,7 +12,7 @@ import {
   isValidEmail,
   MIN_PASSWORD_LEN,
 } from "@/lib/validation";
-import { FacebookIcon, GoogleIcon } from "../icons/icons";
+import { GoogleIcon } from "../icons/icons";
 
 const PANEL_INDEX = { login: 0, signup: 1, verify: 2, forgot: 3 } as const;
 const CODE_RE = /^\d{6}$/;
@@ -297,10 +297,6 @@ export function AuthCardContent() {
               icon={<GoogleIcon className="h-4 w-4" />}
               label="Continue with Google"
             />
-            <SocialButton
-              icon={<FacebookIcon className="h-4 w-4" />}
-              label="Continue with Facebook"
-            />
           </div>
           <Divider />
 
@@ -379,10 +375,6 @@ export function AuthCardContent() {
             <SocialButton
               icon={<GoogleIcon className="h-4 w-4" />}
               label="Continue with Google"
-            />
-            <SocialButton
-              icon={<FacebookIcon className="h-4 w-4" />}
-              label="Continue with Facebook"
             />
           </div>
           <Divider />

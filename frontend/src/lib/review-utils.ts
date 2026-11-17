@@ -9,6 +9,7 @@ export function onlyMine(bookings: Booking[], userId?: string): Booking[] {
 
 /** A stay can be reviewed once it has ended, was not cancelled, and has no review yet. */
 export function canReview(b: Booking, reviews: MyReview[]): boolean {
+  if (b.hasReview === true) return false;
   const today = new Date().toISOString().slice(0, 10);
   return (
     b.status !== "Cancelled" &&

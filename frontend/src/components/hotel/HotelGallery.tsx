@@ -1,17 +1,39 @@
 "use client";
 
 import { useState } from "react";
+import { ImageOff } from "lucide-react";
 import type { HotelMedia } from "@/lib/seed-media";
+import type { HotelMediaApi } from "@/types";
 
 type Item = { kind: "image" | "video"; src: string };
 
-export function HotelGallery({ media, name }: { media: HotelMedia; name: string }) {
-  const items: Item[] = [
+/** Accepts either the seed shape (images/video) or the API shape (photos/video). */
+function toItems(media: HotelMedia | HotelMediaApi): Item[] {
+  if ("photos" in media) {
+    return [
+      ...media.photos.map((photo) => ({ kind: "image" as const, src: photo.url })),
+      ...(media.video ? [{ kind: "video" as const, src: media.video.url }] : []),
+    ];
+  }
+  return [
     ...media.images.map((src) => ({ kind: "image" as const, src })),
     ...(media.video ? [{ kind: "video" as const, src: media.video }] : []),
   ];
+}
+
+export function HotelGallery({ media, name }: { media: HotelMedia | HotelMediaApi; name: string }) {
+  const items = toItems(media);
   const [active, setActive] = useState(0);
   const current = items[active];
+
+  if (!current) {
+    return (
+      <div className="flex aspect-video flex-col items-center justify-center gap-2 rounded-card border border-dashed border-border bg-bg text-ink-soft">
+        <ImageOff aria-hidden className="size-6" />
+        <p className="text-sm">No photos yet</p>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-2">
@@ -35,9 +57,10 @@ export function HotelGallery({ media, name }: { media: HotelMedia; name: string 
       <div className="flex gap-2 overflow-x-auto pb-1">
         {items.map((item, i) => (
           <button
-            key={item.src}
+            key={`${item.kind}-${item.src}`}
             onClick={() => setActive(i)}
             aria-label={item.kind === "video" ? "Play video" : `Photo ${i + 1}`}
+            aria-current={i === active ? "true" : undefined}
             className={`relative h-16 w-24 shrink-0 overflow-hidden rounded-lg border-2 ${
               i === active ? "border-brand-500" : "border-transparent"
             }`}

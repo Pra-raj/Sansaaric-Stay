@@ -117,3 +117,56 @@
     scroll-behavior: auto !important;
   }
 }
+
+/* --------------------------------------------------------------------------
+   Scroll reveal (src/components/ui/Reveal.tsx)
+   -------------------------------------------------------------------------- */
+
+/* With JavaScript disabled nothing ever removes the "hidden" classes, so the
+   content must stay readable on its own. */
+@media (scripting: none) {
+  .reveal {
+    opacity: 1 !important;
+    translate: none !important;
+    transform: none !important;
+  }
+}
+
+/* --------------------------------------------------------------------------
+   Slow drifting background shapes (About / Contact hero bands)
+   -------------------------------------------------------------------------- */
+
+@keyframes drift-slow {
+  0%,
+  100% {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  50% {
+    transform: translate3d(18px, -22px, 0) scale(1.06);
+  }
+}
+
+@keyframes drift-slower {
+  0%,
+  100% {
+    transform: translate3d(0, 0, 0) scale(1.04);
+  }
+  50% {
+    transform: translate3d(-24px, 18px, 0) scale(0.96);
+  }
+}
+
+.drift-slow {
+  animation: drift-slow 16s ease-in-out infinite;
+}
+
+.drift-slower {
+  animation: drift-slower 22s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .drift-slow,
+  .drift-slower {
+    animation: none;
+  }
+}

@@ -1,12 +1,15 @@
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
+import { ImageOff } from "lucide-react";
 import { Badge } from "@/components/ui/Badge";
 import { HotelBookingAside } from "@/components/booking/HotelBookingAside";
-import { getHotelById, getHotelReviews } from "@/lib/api-client";
-import { getSeedMedia } from "@/lib/seed-media";
+import { getHotelById, getHotelMedia, getHotelReviews } from "@/lib/api-client";
+import { getSeedMedia, type HotelMedia } from "@/lib/seed-media";
+import { isMockAllowed } from "@/lib/admin-security";
 import { HotelReviewPrompt } from "@/components/hotel/HotelReviewPrompt";
 import { HotelGallery } from "@/components/hotel/HotelGallery";
-import type { Hotel, Review } from "@/types";
+import { ReviewsSection } from "@/components/hotel/ReviewsSection";
+import type { Hotel, HotelMediaApi, Review } from "@/types";
 
 export async function generateMetadata({
   params,
@@ -61,7 +64,16 @@ export default async function HotelDetailPage({
   } catch {
     reviewsFailed = true;
   }
-  const media = getSeedMedia(hotel.name);
+
+  // Real photos/video from the backend when available. Sample media is a
+  // development-only fallback; production never shows invented photos.
+  let media: HotelMedia | HotelMediaApi | null = null;
+  try {
+    media = await getHotelMedia(hotel.id);
+  } catch {
+    media = null;
+  }
+  if (!media && isMockAllowed()) media = getSeedMedia(hotel.name);
 
   const jsonLd = {
     "@context": "https://schema.org",
@@ -87,21 +99,10 @@ export default async function HotelDetailPage({
           {media ? (
             <HotelGallery media={media} name={hotel.name} />
           ) : (
-            <>
-              <div className="flex aspect-video items-center justify-center rounded-card border border-brand-500/20 bg-gradient-to-b from-brand-800 via-brand-600 to-brand-500 text-white/60 shadow-xl">
-                [ photo &amp; video gallery — images load from the backend ]
-              </div>
-              <div className="flex gap-2 overflow-x-auto pb-1">
-                {[1, 2, 3, 4].map((n) => (
-                  <div
-                    key={n}
-                    className="flex h-16 w-24 shrink-0 items-center justify-center rounded-lg border border-brand-500/20 bg-brand-100 text-[10px] text-brand-600 shadow-sm"
-                  >
-                    photo {n}
-                  </div>
-                ))}
-              </div>
-            </>
+            <div className="flex aspect-video flex-col items-center justify-center gap-2 rounded-card border border-dashed border-border bg-bg text-ink-soft">
+              <ImageOff aria-hidden className="size-6" />
+              <p className="text-sm">No photos yet</p>
+            </div>
           )}
 
           <div>
@@ -135,29 +136,13 @@ export default async function HotelDetailPage({
           <div>
             <h2 className="mb-3 font-semibold">Reviews</h2>
             <HotelReviewPrompt hotelName={hotel.name} />
-            <div className="space-y-3">
-              {reviewsFailed ? (
-                <p className="text-sm text-ink-soft">
-                  Could not load reviews. Please refresh the page.
-                </p>
-              ) : (
-                reviews.length === 0 && (
-                  <p className="text-sm text-ink-soft">No reviews yet.</p>
-                )
-              )}
-              {reviews.map((review) => (
-                <div
-                  key={review.id}
-                  className="rounded-card border border-black/5 bg-surface p-4 shadow-sm"
-                >
-                  <div className="flex items-center justify-between text-sm font-semibold">
-                    <span>{review.authorName}</span>
-                    <span>★ {review.rating}</span>
-                  </div>
-                  <p className="mt-1 text-sm text-ink-soft">{review.comment}</p>
-                </div>
-              ))}
-            </div>
+            {reviewsFailed ? (
+              <p className="text-sm text-ink-soft">
+                Could not load reviews. Please refresh the page.
+              </p>
+            ) : (
+              <ReviewsSection reviews={reviews} rating={hotel.rating} />
+            )}
           </div>
         </div>
 

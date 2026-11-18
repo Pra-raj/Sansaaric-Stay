@@ -29,6 +29,43 @@ export interface Review {
   authorName: string;
   rating: number;
   comment: string;
+  /** ISO timestamp, when the backend sends one. */
+  createdAt?: string;
+}
+
+// ---------------------------------------------------------------------------
+// Media (hotel photos/video + the guest reel feed)
+// ---------------------------------------------------------------------------
+
+export interface HotelPhoto {
+  id: string;
+  url: string;
+  /** 0 = cover photo. */
+  position: number;
+}
+
+export interface HotelVideo {
+  url: string;
+  posterUrl?: string;
+}
+
+/** Shape of GET /hotels/{id}/media. */
+export interface HotelMediaApi {
+  photos: HotelPhoto[];
+  video: HotelVideo | null;
+}
+
+/** One item of the guest video feed (GET /reels). */
+export interface Reel {
+  id: string;
+  hotelId: string;
+  hotelName: string;
+  location: string;
+  videoUrl: string;
+  posterUrl: string;
+  /** Price per night in NPR, when the API sends one. */
+  startingPrice?: number;
+  caption?: string;
 }
 
 export interface BookingDraft {

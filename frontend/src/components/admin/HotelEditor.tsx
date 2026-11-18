@@ -9,6 +9,7 @@ import { createAdminHotel, getAdminHotel, updateAdminHotel } from "@/lib/api-cli
 import { isSafeId } from "@/lib/admin-security";
 import type { AdminHotel, AdminHotelInput } from "@/types";
 import { HotelForm } from "./HotelForm";
+import { HotelMediaPanel } from "./HotelMediaPanel";
 
 /** Add form when no hotelId is given, edit form otherwise. */
 export function HotelEditor({ hotelId }: { hotelId?: string }) {
@@ -65,11 +66,18 @@ export function HotelEditor({ hotelId }: { hotelId?: string }) {
         </p>
       )}
       {!invalidId && state === "ready" && (
-        <HotelForm
-          initial={hotel ?? undefined}
-          submitLabel={editing ? "Save changes" : "Add hotel"}
-          onSubmit={handleSubmit}
-        />
+        <>
+          <HotelForm
+            initial={hotel ?? undefined}
+            submitLabel={editing ? "Save changes" : "Add hotel"}
+            onSubmit={handleSubmit}
+          />
+          {editing && hotelId && (
+            <div className="mt-10 max-w-2xl">
+              <HotelMediaPanel hotelId={hotelId} />
+            </div>
+          )}
+        </>
       )}
     </div>
   );

@@ -10,10 +10,14 @@ import type {
   Booking,
   Destination,
   Hotel,
+  HotelMediaApi,
+  HotelPhoto,
+  HotelVideo,
   InboxChannel,
   InboxListItem,
   InboxThread,
   Review,
+  Reel,
   RevenueSummary,
   TrainingChunk,
   TrainingDocument,
@@ -145,6 +149,7 @@ interface RawHotelReview {
   id: number | string;
   rating: number | string;
   comment?: string;
+  created_at?: string;
 }
 
 function normalizeReview(raw: RawHotelReview): Review {
@@ -153,6 +158,7 @@ function normalizeReview(raw: RawHotelReview): Review {
     authorName: "Guest",
     rating: Number(raw.rating),
     comment: raw.comment ?? "",
+    createdAt: raw.created_at,
   };
 }
 
@@ -284,8 +290,37 @@ export async function getHotelById(id: string): Promise<Hotel | null> {
 }
 
 export async function getHotelReviews(hotelId: string): Promise<Review[]> {
-  const rows = await apiList<RawHotelReview>(`/hotels/${hotelId}/reviews`);
-  return rows.map(normalizeReview);
+  // Public reviews are paginated (100 per page max). Walk every page until the
+  // API says there is no next page, with a safety cap so a broken `next` can
+  // never loop forever.
+  const rows: RawHotelReview[] = [];
+  for (let page = 1; page <= 10; page++) {
+    const data = await apiFetch<
+      RawHotelReview[] | { results?: RawHotelReview[]; next?: string | null }
+    >(`/hotels/${hotelId}/reviews?page_size=100&page=${page}`);
+    if (Array.isArray(data)) {
+      rows.push(...data);
+      break;
+    }
+    const pageRows = data.results ?? [];
+    rows.push(...pageRows);
+    if (!data.next || pageRows.length === 0) break;
+  }
+
+  // Newest first; reviews without a timestamp keep their order at the end.
+  return rows
+    .map(normalizeReview)
+    .map((review, index) => ({ review, index }))
+    .sort((a, b) => {
+      const aTime = a.review.createdAt ? Date.parse(a.review.createdAt) : NaN;
+      const bTime = b.review.createdAt ? Date.parse(b.review.createdAt) : NaN;
+      const aValid = Number.isFinite(aTime);
+      const bValid = Number.isFinite(bTime);
+      if (aValid && bValid && aTime !== bTime) return bTime - aTime;
+      if (aValid !== bValid) return aValid ? -1 : 1;
+      return a.index - b.index;
+    })
+    .map(({ review }) => review);
 }
 
 /** Personalized (or popularity-ranked) picks from the recommendation engine. */
@@ -725,4 +760,370 @@ export function getAdminBookings(): Promise<AdminBooking[]> {
 
 export function getRevenueSummary(): Promise<RevenueSummary> {
   return adminRequest(() => apiFetch<RevenueSummary>(adminPath("revenue")));
+}
+
+// ----- Review moderation ----------------------------------------------------
+// GET /reviews returns every review for a staff user (own reviews otherwise),
+// and DELETE /reviews/{id} is allowed for the owner or staff.
+
+export interface AdminReview {
+  id: string;
+  hotelId: string;
+  hotelName: string;
+  rating: number;
+  comment: string;
+  createdAt: string;
+}
+
+interface RawAdminReview {
+  id: string | number;
+  hotel_id?: string | number;
+  rating?: number | string;
+  comment?: string;
+  created_at?: string;
+}
+
+export async function getAdminReviews(): Promise<AdminReview[]> {
+  return adminRequest(async () => {
+    const rows: RawAdminReview[] = [];
+    for (let page = 1; page <= 10; page++) {
+      const data = await apiFetch<
+        RawAdminReview[] | { results?: RawAdminReview[]; next?: string | null }
+      >(`/reviews?page_size=100&page=${page}`);
+      if (Array.isArray(data)) {
+        rows.push(...data);
+        break;
+      }
+      const pageRows = data.results ?? [];
+      rows.push(...pageRows);
+      if (!data.next || pageRows.length === 0) break;
+    }
+
+    // Resolve hotel names from the admin list; fall back to the public list,
+    // then to "Hotel #id" when a hotel is not visible to this account.
+    const names = new Map<string, string>();
+    const adminHotels = await getAdminHotels().catch(() => []);
+    for (const hotel of adminHotels) names.set(String(hotel.id), hotel.name);
+    if (rows.some((row) => row.hotel_id !== undefined && !names.has(String(row.hotel_id)))) {
+      const publicHotels = await getHotels().catch(() => []);
+      for (const hotel of publicHotels) {
+        if (!names.has(String(hotel.id))) names.set(String(hotel.id), hotel.name);
+      }
+    }
+
+    const reviews: AdminReview[] = rows.map((raw) => {
+      const hotelId = String(raw.hotel_id ?? "");
+      return {
+        id: String(raw.id),
+        hotelId,
+        hotelName: names.get(hotelId) ?? `Hotel #${hotelId || "?"}`,
+        rating: Number(raw.rating ?? 0),
+        comment: raw.comment ?? "",
+        createdAt: raw.created_at ?? "",
+      };
+    });
+
+    return reviews.sort((a, b) => {
+      const aTime = Date.parse(a.createdAt);
+      const bTime = Date.parse(b.createdAt);
+      const aValid = Number.isFinite(aTime);
+      const bValid = Number.isFinite(bTime);
+      if (aValid && bValid && aTime !== bTime) return bTime - aTime;
+      if (aValid !== bValid) return aValid ? -1 : 1;
+      return 0;
+    });
+  });
+}
+
+/** Deletes a review (staff only in the admin UI). Resolves on 204. */
+export async function deleteReview(id: string): Promise<void> {
+  if (!isSafeId(id)) throw new Error("Invalid review id");
+  await adminRequest(() =>
+    apiFetch<void>(`/reviews/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  );
+}
+
+// ----- Media: hotel photos/video and the guest reel feed --------------------
+// The backend endpoints are described in BACKEND-MEDIA-CONTRACT.md. Until they
+// exist, reads degrade to null/[] and uploads report a friendly message.
+
+export const MEDIA_UNAVAILABLE_MESSAGE =
+  "Uploads are not available yet. Please try again later.";
+
+interface RawMediaPhoto {
+  id?: string | number;
+  url?: string;
+  image?: string;
+  photo?: string;
+  position?: number | string;
+  order?: number | string;
+}
+
+interface RawMediaVideo {
+  id?: string | number;
+  url?: string;
+  video?: string;
+  poster?: string;
+  poster_url?: string;
+}
+
+interface RawHotelMedia {
+  photos?: (RawMediaPhoto | string)[];
+  images?: (RawMediaPhoto | string)[];
+  video?: RawMediaVideo | string | null;
+}
+
+function normalizeHotelPhoto(raw: RawMediaPhoto | string, index: number): HotelPhoto | null {
+  const value = typeof raw === "string" ? { url: raw } : raw;
+  if (!value.url) return null;
+  return {
+    id: String(value.id ?? `photo-${index}`),
+    url: value.url,
+    position: Number(value.position ?? value.order ?? index),
+  };
+}
+
+function normalizeHotelVideo(raw: RawMediaVideo | string | null | undefined): HotelVideo | null {
+  if (!raw) return null;
+  if (typeof raw === "string") return { url: raw };
+  const url = raw.url ?? raw.video;
+  if (!url) return null;
+  return { url, posterUrl: raw.poster_url ?? raw.poster };
+}
+
+/** Hotel photos + video. Returns null when the endpoint (or the media) is absent. */
+export async function getHotelMedia(hotelId: string): Promise<HotelMediaApi | null> {
+  try {
+    const data = await apiFetch<RawHotelMedia>(
+      `/hotels/${encodeURIComponent(hotelId)}/media`,
+    );
+    const rows = data.photos ?? data.images ?? [];
+    const photos = rows
+      .map(normalizeHotelPhoto)
+      .filter((photo): photo is HotelPhoto => photo !== null)
+      .sort((a, b) => a.position - b.position);
+    const video = normalizeHotelVideo(data.video);
+    if (photos.length === 0 && !video) return null;
+    return { photos, video };
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 404) return null;
+    throw err;
+  }
+}
+
+interface RawReel {
+  id?: string | number;
+  hotel_id?: string | number;
+  hotelId?: string | number;
+  hotel_name?: string;
+  hotelName?: string;
+  location?: string;
+  video_url?: string;
+  videoUrl?: string;
+  video?: string;
+  url?: string;
+  poster_url?: string;
+  posterUrl?: string;
+  poster?: string;
+  thumbnail_url?: string;
+  starting_price?: number | string | null;
+  startingPrice?: number | string | null;
+  price?: number | string | null;
+  caption?: string;
+  title?: string;
+}
+
+function normalizeReel(raw: RawReel): Reel | null {
+  const videoUrl = raw.video_url ?? raw.videoUrl ?? raw.video ?? raw.url;
+  if (!videoUrl) return null;
+  const hotelId = String(raw.hotel_id ?? raw.hotelId ?? "");
+  const priceValue = raw.starting_price ?? raw.startingPrice ?? raw.price;
+  const startingPrice = priceValue === null || priceValue === undefined ? undefined : Number(priceValue);
+  return {
+    id: String(raw.id ?? (hotelId || videoUrl)),
+    hotelId,
+    hotelName: raw.hotel_name ?? raw.hotelName ?? "",
+    location: raw.location ?? "",
+    videoUrl,
+    posterUrl: raw.poster_url ?? raw.posterUrl ?? raw.poster ?? raw.thumbnail_url ?? "",
+    startingPrice: Number.isFinite(startingPrice) ? startingPrice : undefined,
+    caption: raw.caption ?? raw.title,
+  };
+}
+
+/** Guest video feed. Returns [] until the backend endpoint exists. */
+export async function getReels(limit = 20): Promise<Reel[]> {
+  try {
+    const data = await apiFetch<RawReel[] | { results?: RawReel[] }>(
+      `/reels?limit=${limit}`,
+    );
+    const rows = Array.isArray(data) ? data : data.results ?? [];
+    return rows
+      .map(normalizeReel)
+      .filter((reel): reel is Reel => reel !== null)
+      .slice(0, limit);
+  } catch (err) {
+    if (
+      err instanceof ApiError &&
+      (err.status === 404 || err.status === 405 || err.status === 501)
+    ) {
+      return [];
+    }
+    throw err;
+  }
+}
+
+function mediaUnavailable(err: unknown): never {
+  if (
+    err instanceof ApiError &&
+    (err.status === 404 || err.status === 405 || err.status === 501)
+  ) {
+    throw new ApiError(MEDIA_UNAVAILABLE_MESSAGE, err.status, err.body);
+  }
+  throw err;
+}
+
+function parseResponseBody(text: string): unknown {
+  if (!text) return null;
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * POSTs multipart form data and reports upload progress. Mirrors the token and
+ * 401-refresh handling of uploadTrainingDocuments().
+ */
+function xhrUpload<T>(
+  path: string,
+  form: FormData,
+  onProgress?: (percent: number) => void,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", `${API_BASE_URL}${path}`);
+    const token = getAccessToken();
+    if (token) xhr.setRequestHeader("Authorization", `Bearer ${token}`);
+
+    if (onProgress) {
+      xhr.upload.onprogress = (event) => {
+        if (event.lengthComputable) {
+          onProgress(Math.round((event.loaded / event.total) * 100));
+        }
+      };
+    }
+
+    xhr.onerror = () =>
+      reject(
+        new ApiError(
+          "Can't reach the server. Check your connection and try again.",
+          0,
+          null,
+        ),
+      );
+
+    xhr.onload = () => {
+      const body = parseResponseBody(xhr.responseText);
+      if (xhr.status >= 200 && xhr.status < 300) {
+        onProgress?.(100);
+        resolve(body as T);
+      } else {
+        reject(
+          new ApiError(
+            apiErrorMessage(body) ?? `Upload failed (${xhr.status})`,
+            xhr.status,
+            body,
+          ),
+        );
+      }
+    };
+
+    xhr.send(form);
+  });
+}
+
+async function adminUpload<T>(
+  path: string,
+  form: FormData,
+  onProgress?: (percent: number) => void,
+): Promise<T> {
+  return adminRequest(async () => {
+    const hadToken = Boolean(getAccessToken());
+    try {
+      return await xhrUpload<T>(path, form, onProgress);
+    } catch (err) {
+      // The body is a FormData built by the caller; it can be sent again.
+      if (err instanceof ApiError && err.status === 401 && hadToken) {
+        const refreshed = await refreshAccessToken();
+        if (refreshed) return xhrUpload<T>(path, form, onProgress);
+        clearSession();
+      }
+      throw err;
+    }
+  });
+}
+
+export async function uploadHotelPhoto(
+  hotelId: string,
+  file: File,
+  onProgress?: (percent: number) => void,
+): Promise<HotelPhoto | null> {
+  const path = adminPath("hotels", hotelId, "/photos");
+  const form = new FormData();
+  form.append("file", file, sanitizeFileName(file.name));
+  try {
+    const raw = await adminUpload<RawMediaPhoto | null>(path, form, onProgress);
+    return raw ? normalizeHotelPhoto(raw, 0) : null;
+  } catch (err) {
+    mediaUnavailable(err);
+  }
+}
+
+export async function deleteHotelPhoto(hotelId: string, photoId: string): Promise<void> {
+  if (!isSafeId(photoId)) throw new Error("Invalid photo id");
+  const path = adminPath("hotels", hotelId, `/photos/${encodeURIComponent(photoId)}`);
+  try {
+    await adminRequest(() => apiFetch<void>(path, { method: "DELETE" }));
+  } catch (err) {
+    mediaUnavailable(err);
+  }
+}
+
+export async function reorderHotelPhotos(hotelId: string, ids: string[]): Promise<void> {
+  if (ids.some((id) => !isSafeId(id))) throw new Error("Invalid photo id");
+  const path = adminPath("hotels", hotelId, "/photos/order");
+  try {
+    await adminRequest(() =>
+      apiFetch<void>(path, { method: "PATCH", body: JSON.stringify({ ids }) }),
+    );
+  } catch (err) {
+    mediaUnavailable(err);
+  }
+}
+
+export async function uploadHotelVideo(
+  hotelId: string,
+  file: File,
+  onProgress?: (percent: number) => void,
+): Promise<HotelVideo | null> {
+  const path = adminPath("hotels", hotelId, "/video");
+  const form = new FormData();
+  form.append("file", file, sanitizeFileName(file.name));
+  try {
+    const raw = await adminUpload<RawMediaVideo | null>(path, form, onProgress);
+    return normalizeHotelVideo(raw ?? null);
+  } catch (err) {
+    mediaUnavailable(err);
+  }
+}
+
+export async function deleteHotelVideo(hotelId: string): Promise<void> {
+  const path = adminPath("hotels", hotelId, "/video");
+  try {
+    await adminRequest(() => apiFetch<void>(path, { method: "DELETE" }));
+  } catch (err) {
+    mediaUnavailable(err);
+  }
 }

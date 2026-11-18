@@ -10,6 +10,7 @@ import {
   LayoutDashboard,
   LogOut,
   ScrollText,
+  Star,
   TrendingUp,
 } from "lucide-react";
 import { Avatar } from "@/components/ui/Avatar";
@@ -33,6 +34,7 @@ const groups = [
     label: "Support",
     items: [
       { name: "Inbox", href: "/admin/inbox", icon: Inbox },
+      { name: "Reviews", href: "/admin/reviews", icon: Star },
       { name: "Documents", href: "/admin/documents", icon: FileText },
     ],
   },

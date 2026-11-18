@@ -16,6 +16,7 @@ const segmentLabels: Record<string, string> = {
   bookings: "Bookings",
   revenue: "Revenue",
   inbox: "Inbox",
+  reviews: "Reviews",
   documents: "Documents",
   activity: "Activity log",
 };

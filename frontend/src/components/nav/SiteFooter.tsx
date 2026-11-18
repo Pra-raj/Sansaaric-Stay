@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { FacebookIcon, InstagramIcon, TikTokIcon } from "../icons/icons";
+import { socialLinks } from "@/lib/social-links";
 
 const columns = [
   {
@@ -36,24 +36,6 @@ const columns = [
         href: "/partner",
       },
     ],
-  },
-];
-
-const socialLinks = [
-  {
-    label: "Facebook",
-    href: "https://www.facebook.com/share/1FKDJxx47K/?mibextid=wwXIfr",
-    icon: FacebookIcon,
-  },
-  {
-    label: "Instagram",
-    href: "https://www.instagram.com/sansaaric.stay?stkn=bGZwcXhmMXh2cWk=",
-    icon: InstagramIcon,
-  },
-  {
-    label: "TikTok",
-    href: "https://www.tiktok.com/@sansaaric.stay?_r=1&_t=ZS-99a7XLQl2Zt",
-    icon: TikTokIcon,
   },
 ];
 
